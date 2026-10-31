@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from nostr_hermes_proxy.hermes import ModelOption, TurnResult
+from nostr_hermes_proxy.hermes import ModelOption, RunSubmission, TurnResult
 from nostr_hermes_proxy.sessions import SessionMap
 
 
@@ -99,30 +99,53 @@ class FakeCtx:
 
 
 class FakeHermes:
-    """Duck-types the parts of HermesClient the personality runtime uses."""
+    """Duck-types the parts of HermesClient the personality runtime uses.
+
+    ``submissions`` feeds ``submit_run`` (``RunSubmission`` or an exception;
+    ``None`` means a fresh auto-numbered run). ``results`` feeds
+    ``stream_run`` (``TurnResult`` or an exception). The gate blocks inside
+    ``stream_run`` so a test can deliver a second DM while a run is in flight.
+    """
 
     def __init__(
         self,
         sessions: SessionMap,
         *,
         results: list[Any] | None = None,
+        submissions: list[Any] | None = None,
         session_id: str = "sess-1",
         models: list[ModelOption] | None = None,
+        steer_result: bool = True,
     ) -> None:
         self.sessions = sessions
         self.session_id = session_id
         self.models = models or []
         self.ensure_calls: list[str] = []
-        self.run_calls: list[tuple[str, str, str]] = []
         self.create_calls: list[str] = []
+        self.submit_calls: list[tuple[str, str, str]] = []
+        self.stream_calls: list[str] = []
+        self.steer_calls: list[tuple[str, str]] = []
+        self.submissions: list[Any] = (
+            list(submissions) if submissions is not None else []
+        )
+        self.steer_result = steer_result
+        self.steer_results: list[Any] = []
         self.active = 0
         self.max_active = 0
         self.gate = asyncio.Event()
         self.gate.set()
         self.entered = asyncio.Event()
-        out = results if results is not None else [TurnResult("hello", status="completed")]
+        self._run_seq = 0
+        out = results if results is not None else [
+            TurnResult("hello", status="completed"),
+        ]
         self.results: list[Any] = list(out)
         self._last_result = out[-1] if out else TurnResult("", status="failed")
+
+    @property
+    def run_calls(self) -> list[tuple[str, str, str]]:
+        """Backwards-compatible alias for tests written before the runs API."""
+        return self.submit_calls
 
     async def ensure_session(self, name: str):
         self.ensure_calls.append(name)
@@ -139,19 +162,49 @@ class FakeHermes:
     async def list_models(self) -> list[ModelOption]:
         return list(self.models)
 
-    async def run_turn(self, name: str, text: str, event_id: str):
-        self.run_calls.append((name, text, event_id))
+    def _next_submission(self) -> Any:
+        if self.submissions:
+            item = self.submissions.pop(0)
+            if item is not None:
+                return item
+        self._run_seq += 1
+        return RunSubmission(run_id=f"run-{self._run_seq}")
+
+    async def submit_run(self, name: str, text: str, event_id: str):
+        self.submit_calls.append((name, text, event_id))
+        item = self._next_submission()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def stream_run(self, run_id: str):
+        self.stream_calls.append(run_id)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         self.entered.set()
         try:
             await self.gate.wait()
-            result = self.results.pop(0) if len(self.results) > 1 else self._last_result
+            result = (
+                self.results.pop(0)
+                if len(self.results) > 1
+                else self._last_result
+            )
             if isinstance(result, BaseException):
                 raise result
             return result
         finally:
             self.active -= 1
+
+    async def steer(self, run_id: str, text: str) -> bool:
+        self.steer_calls.append((run_id, text))
+        item = (
+            self.steer_results.pop(0)
+            if self.steer_results
+            else self.steer_result
+        )
+        if isinstance(item, BaseException):
+            raise item
+        return bool(item)
 
 
 @dataclass
@@ -171,6 +224,8 @@ def make_harness(
     allow_hex: str,
     send_result: bool = True,
     results: list[Any] | None = None,
+    submissions: list[Any] | None = None,
+    steer_result: bool = True,
     models: list[ModelOption] | None = None,
     bot: Any | None = None,
     ack: Any | None = None,
@@ -185,7 +240,11 @@ def make_harness(
     sessions = SessionMap(tmp_path / "sessions.json" if tmp_path else None)
     fake_bot = bot if bot is not None else FakeBot(send_result=send_result)
     fake_hermes = FakeHermes(
-        sessions, results=results, models=models,
+        sessions,
+        results=results,
+        submissions=submissions,
+        models=models,
+        steer_result=steer_result,
     )
     fake_ack = ack if ack is not None else FakeAckPolicy()
     config = PersonalityConfig(

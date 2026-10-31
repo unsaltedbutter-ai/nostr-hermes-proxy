@@ -18,8 +18,11 @@ exists.
   everyone else
 - Forward each DM to the local Hermes gateway over its authenticated HTTP API,
   keeping one persistent Hermes session per personality
+- **Steer** a follow-up DM into the turn already running instead of queueing it
 - Reply over NIP-17 gift wraps: **ack** on receipt, **tool-call noise omitted
   or summarized**, long replies chunked
+- Drop replayed duplicate deliveries (the gateway's durable `Idempotency-Key`
+  replay) without sending a second reply
 - Intercept special commands before Hermes: `/new` (fresh conversation),
   `/model` (switch models), `/status`
 
@@ -39,6 +42,28 @@ nostr-hermes-proxy (own LaunchAgent)
     ▼
 Hermes gateway API server (one persistent session per personality)
 ```
+
+### Message flow
+
+Each ordinary DM is submitted as a durable Hermes **run**:
+
+1. `POST /v1/runs` with `{"input": text, "session_id": …}` and
+   `Idempotency-Key: <gift-wrap event id>`. The key is retained by the gateway
+   for 24 h, so an exact redelivery returns the original `run_id` with
+   `Idempotency-Replayed: true` — the proxy logs it and sends **no reply**.
+2. `GET /v1/runs/{run_id}/events` is streamed for the reply. `message.delta`
+   tokens accumulate, `run.completed` carries the authoritative final output,
+   `tool.completed`/`tool.failed` feed the optional one-line tool summary, and
+   `: keepalive` comment lines are skipped. If the stream ends before a
+   terminal frame, one `GET /v1/runs/{run_id}` poll provides `{status, output}`.
+3. While that run is in flight, another DM from the owner is **steered** with
+   `POST /v1/runs/{run_id}/steer` rather than queued. A steered DM gets **no
+   ack** and no separate reply: the running turn's reply covers both messages.
+   If the steer is refused because the turn just finished, the proxy falls
+   back to submitting a new turn (serialized by the gateway's session lease).
+4. `run.failed` / `run.cancelled` / `run.interrupted` produce an error DM;
+   successful replies are chunked at ~4096 characters with fence-aware
+   `(1/N)` markers.
 
 ## Foundation
 
@@ -152,8 +177,10 @@ remove the placeholder values once the env file is in place.
 | `/status` | Personality, model, session age, queue, relays, watchdog state |
 | `/help` | Command list |
 
-Anything else is forwarded to Hermes verbatim. Long replies are split at
-roughly 4096 characters with fence-aware `(1/N)` markers.
+Anything else is forwarded to Hermes verbatim as a `/v1/runs` run. A DM sent
+while a turn is running steers that turn (no ack for the steered message); an
+exact duplicate delivery is dropped. Long replies are split at roughly 4096
+characters with fence-aware `(1/N)` markers.
 
 ## Development
 

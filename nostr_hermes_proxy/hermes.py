@@ -1,8 +1,13 @@
 """Hermes gateway HTTP API client.
 
 Talks only to the authenticated API server (DESIGN.md §4). The client owns the
-session map: ``ensure_session`` creates/recreates sessions, ``run_turn`` streams
-one SSE turn with per-personality session scope and idempotency headers.
+session map: ``ensure_session`` creates/recreates sessions, ``submit_run``
+creates an idempotent run, ``stream_run`` consumes its SSE event stream (with a
+single poll fallback), and ``steer`` feeds text into an in-flight run.
+
+Turns use ``/v1/runs`` rather than the session-chat stream because the session
+chat endpoint ignores ``Idempotency-Key`` (Probe A), while runs are durable for
+24 h and replay the original ``run_id`` for an exact retry.
 """
 
 from __future__ import annotations
@@ -29,7 +34,9 @@ WRITE_TIMEOUT_SECONDS = 60.0
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
+STATUS_INTERRUPTED = "interrupted"
 STATUS_INCOMPLETE = "incomplete"
+STATUS_REPLAYED = "replayed"
 
 
 class HermesError(RuntimeError):
@@ -93,10 +100,31 @@ class TurnResult:
     tool_summary: list[ToolEvent] = field(default_factory=list)
     status: str = STATUS_INCOMPLETE
     error: str | None = None
+    #: True when the submission replayed an earlier run (duplicate DM).
+    replayed: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.status == STATUS_COMPLETED and bool(self.final_text.strip())
+        return (
+            self.status == STATUS_COMPLETED
+            and bool(self.final_text.strip())
+            and not self.replayed
+        )
+
+
+@dataclass(frozen=True)
+class RunSubmission:
+    """Outcome of ``POST /v1/runs``.
+
+    ``replayed`` is true when the gateway recognised the ``Idempotency-Key``
+    (``Idempotency-Replayed: true`` header and/or ``replayed: true`` in the
+    JSON body); the caller must not reply because the first delivery already
+    did. Note that a fresh submission also returns HTTP 202 on gateway
+    v0.22.5, so the status code alone is not a replay signal.
+    """
+
+    run_id: str
+    replayed: bool = False
 
 
 class HermesClient:
@@ -203,77 +231,165 @@ class HermesClient:
         text: str,
         event_id: str,
     ) -> TurnResult:
-        """Run one session turn and consume its SSE stream."""
+        """Submit one turn via ``/v1/runs`` and consume its event stream.
+
+        A replayed submission returns a ``STATUS_REPLAYED`` sentinel instead of
+        streaming anything: the original delivery already produced the reply.
+        """
+        submission = await self.submit_run(personality, text, event_id)
+        if submission.replayed:
+            return TurnResult(
+                final_text="", status=STATUS_REPLAYED, replayed=True,
+            )
+        return await self.stream_run(submission.run_id)
+
+    async def submit_run(
+        self,
+        personality: str,
+        text: str,
+        event_id: str,
+    ) -> RunSubmission:
+        """``POST /v1/runs`` with the gift-wrap event id as idempotency key.
+
+        A 404 means the mapped session is gone (``HermesSessionGone``); the
+        personality layer recreates it and retries. A replay
+        (``Idempotency-Replayed: true`` header or ``replayed: true`` body)
+        returns the original ``run_id`` with ``replayed=True``. The live
+        gateway returns 202 for fresh submissions too, so 202 is not used as
+        a replay signal.
+        """
         entry = self.sessions.get(personality)
         if entry is None or not entry.hermes_session_id:
             raise HermesSessionGone(
                 f"no Hermes session mapped for personality {personality!r}"
             )
 
-        payload: dict[str, Any] = {"input": text}
+        payload: dict[str, Any] = {
+            "input": text,
+            "session_id": entry.hermes_session_id,
+        }
+        # Per-request model selection mirrors the old session-chat path; only
+        # include it when the personality has a preference.
         if entry.model:
             payload["model"] = entry.model
         if entry.provider:
             payload["provider"] = entry.provider
 
         headers = {
-            "Accept": "text/event-stream",
+            "Accept": "application/json",
             "Idempotency-Key": event_id,
             "X-Hermes-Session-Key": self.session_key(personality),
         }
-        url = (
-            f"/api/sessions/{quote(entry.hermes_session_id, safe='')}"
-            "/chat/stream"
+        response = await self._client.post(
+            "/v1/runs", json=payload, headers=headers,
         )
+        await self._raise_for_status(
+            response, f"submit run for {personality}",
+        )
+        data = self._json_body(response)
+        # Live gateway v0.22.5 returns HTTP 202 for *every* run submission
+        # (fresh or replayed); only the header/body flag distinguishes a
+        # duplicate. Do not treat 202 alone as a replay.
+        replayed = (
+            (
+                response.headers.get("Idempotency-Replayed") or ""
+            ).strip().lower() == "true"
+            or (isinstance(data, dict) and data.get("replayed") is True)
+        )
+        run_id = self._extract_run_id(data) or ""
+        if not run_id and not replayed:
+            raise HermesError(
+                "submit run response did not contain a run id",
+                status_code=response.status_code,
+            )
+        return RunSubmission(run_id=run_id, replayed=replayed)
 
+    async def stream_run(self, run_id: str) -> TurnResult:
+        """Consume ``GET /v1/runs/{run_id}/events`` until a terminal frame.
+
+        Final text comes from ``message.delta`` frames, but the terminal
+        ``run.completed`` ``output`` is authoritative when present. If the
+        stream ends before any terminal frame, fall back to one
+        ``GET /v1/runs/{run_id}`` poll for ``{status, output}``.
+        """
         final_parts: list[str] = []
         tools: list[ToolEvent] = []
         pending_tools: dict[str, ToolEvent] = {}
         status = STATUS_INCOMPLETE
         error: str | None = None
+        terminal = False
 
-        async with self._client.stream(
-            "POST", url, json=payload, headers=headers,
-        ) as response:
-            await self._raise_for_status(
-                response, f"chat stream for {personality}",
-            )
-            async for event_name, data in self._iter_sse(response):
-                name, body = self._normalize_event(event_name, data)
-                if name == "assistant.delta":
-                    delta = self._extract_text(body)
-                    if delta:
-                        final_parts.append(delta)
-                elif name == "assistant.commentary":
-                    continue
-                elif name == "tool.started":
-                    tool = self._tool_event(body, started=True)
-                    pending_tools[self._tool_key(body, tool, pending_tools)] = tool
-                    tools.append(tool)
-                elif name in ("tool.completed", "tool.failed"):
-                    self._merge_tool_event(
-                        body,
-                        tools,
-                        pending_tools,
-                        failed=name == "tool.failed",
-                    )
-                elif name == "run.completed":
-                    status = STATUS_COMPLETED
-                    if not final_parts:
-                        output = self._extract_text(body)
+        url = f"/v1/runs/{quote(run_id, safe='')}/events"
+        try:
+            async with self._client.stream(
+                "GET", url, headers={"Accept": "text/event-stream"},
+            ) as response:
+                await self._raise_for_status(
+                    response, f"run events for {run_id}",
+                )
+                async for event_name, data in self._iter_sse(response):
+                    name, body = self._normalize_event(event_name, data)
+                    if name == "message.delta":
+                        delta = self._extract_text(body)
+                        if delta:
+                            final_parts.append(delta)
+                    elif name in ("message.interim", "assistant.commentary"):
+                        # Interim commentary is not part of the final reply.
+                        continue
+                    elif name == "tool.started":
+                        tool = self._tool_event(body, started=True)
+                        pending_tools[
+                            self._tool_key(body, tool, pending_tools)
+                        ] = tool
+                        tools.append(tool)
+                    elif name in ("tool.completed", "tool.failed"):
+                        self._merge_tool_event(
+                            body,
+                            tools,
+                            pending_tools,
+                            failed=name == "tool.failed",
+                        )
+                    elif name == "run.completed":
+                        terminal = True
+                        status = STATUS_COMPLETED
+                        output = self._extract_output(body)
                         if output:
-                            final_parts.append(output)
-                elif name == "run.failed":
-                    status = STATUS_FAILED
-                    error = self._error_message(body) or "run failed"
-                elif name == "run.cancelled":
-                    status = STATUS_CANCELLED
-                    error = self._error_message(body) or "run cancelled"
-                elif name == "error":
-                    status = STATUS_FAILED
-                    error = self._error_message(body) or "gateway error"
-                elif name in ("", "message", "ping", "keepalive"):
-                    continue
+                            final_parts = [output]
+                    elif name == "run.failed":
+                        terminal = True
+                        status = STATUS_FAILED
+                        error = self._error_message(body) or "run failed"
+                    elif name == "run.cancelled":
+                        terminal = True
+                        status = STATUS_CANCELLED
+                        error = self._error_message(body) or "run cancelled"
+                    elif name == "run.interrupted":
+                        terminal = True
+                        status = STATUS_INTERRUPTED
+                        error = self._error_message(body) or "run interrupted"
+                    elif name == "error":
+                        terminal = True
+                        status = STATUS_FAILED
+                        error = self._error_message(body) or "gateway error"
+                    elif name.startswith("subagent."):
+                        continue
+                    elif name in ("", "message", "ping", "keepalive"):
+                        continue
+        except (HermesError, httpx.HTTPError) as exc:
+            logger.warning(
+                "Run events stream for %s ended abnormally: %s", run_id, exc,
+            )
+
+        if not terminal:
+            polled = await self._poll_run(run_id)
+            if polled is not None:
+                polled_status, polled_text, polled_error = polled
+                if polled_status != STATUS_INCOMPLETE:
+                    status = polled_status
+                if polled_text:
+                    final_parts = [polled_text]
+                if polled_error:
+                    error = polled_error
 
         return TurnResult(
             final_text="".join(final_parts),
@@ -281,6 +397,70 @@ class HermesClient:
             status=status,
             error=error,
         )
+
+    async def steer(self, run_id: str, text: str) -> bool:
+        """``POST /v1/runs/{run_id}/steer``; True only if accepted.
+
+        Any refusal (non-200, ``accepted`` not true, unknown run / completed
+        run) returns False so the caller can fall back to a new turn. Network
+        failures also return False rather than raising.
+        """
+        url = f"/v1/runs/{quote(run_id, safe='')}/steer"
+        try:
+            response = await self._client.post(url, json={"input": text})
+        except httpx.HTTPError as exc:
+            logger.warning("Steer for run %s failed: %s", run_id, exc)
+            return False
+        if response.status_code != 200:
+            logger.info(
+                "Steer for run %s refused (HTTP %s)",
+                run_id, response.status_code,
+            )
+            return False
+        try:
+            data = response.json()
+        except ValueError:
+            return False
+        return isinstance(data, dict) and data.get("accepted") is True
+
+    async def _poll_run(
+        self, run_id: str,
+    ) -> tuple[str, str, str | None] | None:
+        """One ``GET /v1/runs/{run_id}`` fallback after an abnormal stream end."""
+        url = f"/v1/runs/{quote(run_id, safe='')}"
+        try:
+            response = await self._client.get(url)
+        except httpx.HTTPError as exc:
+            logger.warning("Run poll for %s failed: %s", run_id, exc)
+            return None
+        if response.status_code >= 400:
+            logger.warning(
+                "Run poll for %s returned HTTP %s", run_id, response.status_code,
+            )
+            return None
+        try:
+            data = self._json_body(response)
+        except HermesError as exc:
+            logger.warning("Run poll for %s returned bad JSON: %s", run_id, exc)
+            return None
+        if not isinstance(data, dict):
+            return None
+        raw_status = str(data.get("status") or "").strip().lower()
+        status = {
+            "completed": STATUS_COMPLETED,
+            "failed": STATUS_FAILED,
+            "cancelled": STATUS_CANCELLED,
+            "canceled": STATUS_CANCELLED,
+            "interrupted": STATUS_INTERRUPTED,
+        }.get(raw_status, STATUS_INCOMPLETE)
+        error: str | None = None
+        if status == STATUS_FAILED:
+            error = self._error_message(data) or "run failed"
+        elif status == STATUS_CANCELLED:
+            error = self._error_message(data) or "run cancelled"
+        elif status == STATUS_INTERRUPTED:
+            error = self._error_message(data) or "run interrupted"
+        return status, self._extract_output(data), error
 
     # -- models ----------------------------------------------------------------
 
@@ -355,6 +535,24 @@ class HermesClient:
         if isinstance(nested_data, (dict, str)):
             return HermesClient._extract_text(nested_data)
         return ""
+
+    @staticmethod
+    def _extract_output(body: Any) -> str:
+        """Terminal/poll ``output`` is authoritative over accumulated deltas."""
+        if isinstance(body, dict):
+            value = body.get("output")
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict):
+                nested = HermesClient._extract_text(value)
+                if nested:
+                    return nested
+            nested_data = body.get("data")
+            if isinstance(nested_data, dict):
+                output = nested_data.get("output")
+                if isinstance(output, str):
+                    return output
+        return HermesClient._extract_text(body)
 
     @staticmethod
     def _error_message(body: Any) -> str | None:
@@ -571,6 +769,22 @@ class HermesClient:
             ) from exc
 
     @staticmethod
+    def _extract_run_id(data: Any) -> str | None:
+        if not isinstance(data, dict):
+            return None
+        for key in ("run_id", "id"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
+        for key in ("run", "data"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                found = HermesClient._extract_run_id(nested)
+                if found:
+                    return found
+        return None
+
+    @staticmethod
     def _extract_session_id(data: Any) -> str | None:
         if not isinstance(data, dict):
             return None
@@ -596,6 +810,13 @@ __all__ = [
     "HermesRateLimitError",
     "HermesSessionGone",
     "ModelOption",
+    "RunSubmission",
+    "STATUS_CANCELLED",
+    "STATUS_COMPLETED",
+    "STATUS_FAILED",
+    "STATUS_INCOMPLETE",
+    "STATUS_INTERRUPTED",
+    "STATUS_REPLAYED",
     "ToolEvent",
     "TurnResult",
 ]

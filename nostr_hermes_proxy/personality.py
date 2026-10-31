@@ -2,7 +2,8 @@
 
 The SDK owns relay plumbing, dedup, and NIP-17/04 protocol matching. This class
 owns policy: the owner allowlist, local commands, ack scheduling, per-
-personality turn serialization, Hermes error handling, and chunked replies.
+personality turn serialization, steering of in-flight turns, Hermes error
+handling, and chunked replies.
 """
 
 from __future__ import annotations
@@ -64,6 +65,10 @@ class PersonalityRuntime:
         self._watchdog_stall_seconds = watchdog_stall_seconds
         self._clock = clock or time.time
         self._turn_lock = asyncio.Lock()
+        #: Run id of the turn currently executing, or None when idle. Read
+        #: without the lock so mid-turn DMs can steer immediately.
+        self._run_id: str | None = None
+        #: DMs pending on the turn lock (steer-refused fallbacks / queued).
         self._waiting = 0
         self._started = False
         self._watchdog_status: Callable[[], str] = lambda: "not running"
@@ -232,6 +237,38 @@ class PersonalityRuntime:
     # -- turns -----------------------------------------------------------------
 
     async def _handle_turn(self, ctx: Any, text: str) -> None:
+        """Run or steer one non-command DM.
+
+        A DM that arrives while a run is in flight is steered into it (no ack,
+        no reply of its own — the running turn's reply covers it). If the
+        steer is refused because the turn just became terminal, fall back to a
+        normal turn, waiting on the per-personality lock.
+        """
+        if self._run_id is not None and await self._try_steer(text):
+            return
+        await self._run_as_turn(ctx, text)
+
+    async def _try_steer(self, text: str) -> bool:
+        run_id = self._run_id
+        if not run_id:
+            return False
+        try:
+            accepted = await self.hermes.steer(run_id, text)
+        except Exception:
+            logger.exception(
+                "Steering run %s for %s failed", run_id, self.name,
+            )
+            return False
+        if accepted:
+            logger.info("Steered in-flight run %s for %s", run_id, self.name)
+        else:
+            logger.info(
+                "Steer refused for %s (run %s just finished); queueing a turn",
+                self.name, run_id,
+            )
+        return bool(accepted)
+
+    async def _run_as_turn(self, ctx: Any, text: str) -> None:
         sender = ctx.sender_hex
         ack: PendingAck | None = await self.ack_policy.arm(
             text, lambda ack_text: self.bot.send_dm(sender, ack_text),
@@ -242,7 +279,22 @@ class PersonalityRuntime:
             async with self._turn_lock:
                 self._waiting -= 1
                 waiting = False
-                result = await self._run_turn_with_recovery(ctx, text)
+                submission = await self._submit_with_recovery(ctx, text)
+                if submission.replayed:
+                    logger.info(
+                        "Duplicate DM for %s replayed run %s; dropping it "
+                        "without a reply",
+                        self.name, submission.run_id,
+                    )
+                    await ack.cancel()
+                    return
+                self._run_id = submission.run_id
+                try:
+                    result = await self.hermes.stream_run(
+                        submission.run_id,
+                    )
+                finally:
+                    self._run_id = None
                 # Stop a pending delayed ack before the real reply lands.
                 await ack.cancel()
                 if result.status != STATUS_COMPLETED:
@@ -277,18 +329,22 @@ class PersonalityRuntime:
                 self._waiting -= 1
             await ack.cancel()
 
-    async def _run_turn_with_recovery(self, ctx: Any, text: str):
+    async def _submit_with_recovery(self, ctx: Any, text: str):
         event_id = getattr(ctx, "event_id", None) or uuid.uuid4().hex
         await self.hermes.ensure_session(self.name)
         try:
-            return await self.hermes.run_turn(self.name, text, str(event_id))
+            return await self.hermes.submit_run(
+                self.name, text, str(event_id),
+            )
         except HermesSessionGone:
             logger.warning(
                 "Hermes session for %s vanished mid-turn; recreating",
                 self.name,
             )
             await self.hermes.ensure_session(self.name)
-            return await self.hermes.run_turn(self.name, text, str(event_id))
+            return await self.hermes.submit_run(
+                self.name, text, str(event_id),
+            )
 
     async def _send_chunks(self, ctx: Any, text: str) -> None:
         for chunk in truncate_message(text):

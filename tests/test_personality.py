@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from nostr_hermes_proxy.hermes import (
     HermesError,
     HermesSessionGone,
     ModelOption,
+    RunSubmission,
     TurnResult,
 )
-from nostr_hermes_proxy.sessions import SessionMap
 
-from .fakes import FakeAckPolicy, FakeBot, FakeCtx, make_harness
+from .fakes import FakeBot, FakeCtx, make_harness
 
 
 async def wait_for(predicate, attempts: int = 50) -> None:
@@ -28,14 +26,14 @@ async def test_non_allowlisted_sender_is_dropped(test_hex):
     intruder = FakeCtx(sender_hex="ab" * 32, event_id="e")
     await harness.runtime.handle_dm(intruder, "hello")
     assert harness.bot.sent == []
-    assert harness.hermes.run_calls == []
+    assert harness.hermes.submit_calls == []
     assert harness.hermes.ensure_calls == []
 
 
 async def test_non_command_is_forwarded_and_replied(test_hex):
     harness = make_harness(allow_hex=test_hex)
     await harness.runtime.handle_dm(harness.ctx, "  hello world  ")
-    assert harness.hermes.run_calls == [
+    assert harness.hermes.submit_calls == [
         ("atlas", "  hello world  ", "event-1"),
     ]
     assert harness.bot.sent[-1][1] == "hello"
@@ -45,7 +43,7 @@ async def test_missing_event_id_generates_one(test_hex):
     harness = make_harness(allow_hex=test_hex)
     harness.ctx.event_id = None
     await harness.runtime.handle_dm(harness.ctx, "hello")
-    generated = harness.hermes.run_calls[0][2]
+    generated = harness.hermes.submit_calls[0][2]
     assert isinstance(generated, str) and len(generated) == 32
 
 
@@ -56,10 +54,21 @@ async def test_ack_is_armed_and_cancelled_for_turn(test_hex):
     assert harness.ack.cancelled >= 1
 
 
+async def test_run_id_is_tracked_during_turn_and_cleared(test_hex):
+    harness = make_harness(allow_hex=test_hex)
+    harness.hermes.gate.clear()
+    task = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "hello"))
+    await harness.hermes.entered.wait()
+    assert harness.runtime._run_id == "run-1"
+    harness.hermes.gate.set()
+    await task
+    assert harness.runtime._run_id is None
+
+
 async def test_help_command_is_local(test_hex):
     harness = make_harness(allow_hex=test_hex)
     await harness.runtime.handle_dm(harness.ctx, "/HELP")
-    assert harness.hermes.run_calls == []
+    assert harness.hermes.submit_calls == []
     assert harness.ack.armed == []
     assert "Commands:" in harness.bot.sent[-1][1]
 
@@ -67,7 +76,7 @@ async def test_help_command_is_local(test_hex):
 async def test_unknown_command_is_local(test_hex):
     harness = make_harness(allow_hex=test_hex)
     await harness.runtime.handle_dm(harness.ctx, "/deploy now")
-    assert harness.hermes.run_calls == []
+    assert harness.hermes.submit_calls == []
     assert "Unknown command /deploy" in harness.bot.sent[-1][1]
 
 
@@ -80,7 +89,7 @@ async def test_model_list_command(test_hex):
     reply = harness.bot.sent[-1][1]
     assert "- openrouter/claude" in reply
     assert "- llama" in reply
-    assert harness.hermes.run_calls == []
+    assert harness.hermes.submit_calls == []
 
 
 async def test_model_set_command_persists(test_hex):
@@ -90,7 +99,7 @@ async def test_model_set_command_persists(test_hex):
     assert entry.model == "claude"
     assert entry.provider == "openrouter"
     assert "Model set to openrouter/claude." in harness.bot.sent[-1][1]
-    assert harness.hermes.run_calls == []
+    assert harness.hermes.submit_calls == []
 
 
 async def test_model_set_bad_usage(test_hex):
@@ -123,36 +132,97 @@ async def test_status_command(test_hex, clock):
     assert "Queue: 0 waiting" in reply
     assert "Relays: 2" in reply
     assert "Watchdog: ok" in reply
-    assert harness.hermes.run_calls == []
+    assert harness.hermes.submit_calls == []
 
 
-async def test_turns_are_serialized_per_personality(test_hex):
+# -- steering ------------------------------------------------------------------
+
+
+async def test_second_dm_during_turn_steers_and_does_not_ack(test_hex):
     harness = make_harness(allow_hex=test_hex)
     harness.hermes.gate.clear()
 
     first = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
     await harness.hermes.entered.wait()
-    assert harness.hermes.active == 1
+
+    second_ctx = FakeCtx(sender_hex=test_hex, event_id="event-2")
+    await harness.runtime.handle_dm(second_ctx, "two")
+
+    assert harness.hermes.steer_calls == [("run-1", "two")]
+    assert len(harness.hermes.submit_calls) == 1
+    # Only the first DM armed an ack; the steered DM gets no ack.
+    assert harness.ack.armed == ["one"]
+    assert harness.runtime.queue_depth == 0
+
+    harness.hermes.gate.set()
+    await first
+    assert [text for _, text in harness.bot.sent] == ["hello"]
+
+
+async def test_steer_refused_falls_back_to_queued_turn(test_hex):
+    harness = make_harness(allow_hex=test_hex, steer_result=False)
+    harness.hermes.gate.clear()
+
+    first = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
+    await harness.hermes.entered.wait()
 
     second_ctx = FakeCtx(sender_hex=test_hex, event_id="event-2")
     second = asyncio.create_task(
         harness.runtime.handle_dm(second_ctx, "two"),
     )
     await wait_for(lambda: harness.runtime.queue_depth == 1)
-    assert len(harness.hermes.run_calls) == 1
+    assert harness.hermes.steer_calls == [("run-1", "two")]
+    assert len(harness.hermes.submit_calls) == 1
     assert harness.hermes.max_active == 1
 
     harness.hermes.gate.set()
     await asyncio.gather(first, second)
-    assert [call[1] for call in harness.hermes.run_calls] == ["one", "two"]
+    assert [call[1] for call in harness.hermes.submit_calls] == ["one", "two"]
     assert harness.hermes.max_active == 1
     assert len(harness.bot.sent) == 2
+    assert harness.runtime.queue_depth == 0
+
+
+async def test_steer_exception_falls_back_to_new_turn(test_hex):
+    harness = make_harness(allow_hex=test_hex)
+    harness.hermes.steer_results = [RuntimeError("gateway hiccup")]
+    harness.hermes.gate.clear()
+
+    first = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
+    await harness.hermes.entered.wait()
+
+    second_ctx = FakeCtx(sender_hex=test_hex, event_id="event-2")
+    second = asyncio.create_task(
+        harness.runtime.handle_dm(second_ctx, "two"),
+    )
+    await wait_for(lambda: harness.runtime.queue_depth == 1)
+
+    harness.hermes.gate.set()
+    await asyncio.gather(first, second)
+    assert [call[1] for call in harness.hermes.submit_calls] == ["one", "two"]
+
+
+# -- duplicate replay ----------------------------------------------------------
+
+
+async def test_replayed_duplicate_sends_nothing(test_hex):
+    harness = make_harness(
+        allow_hex=test_hex,
+        submissions=[RunSubmission(run_id="run-1", replayed=True)],
+    )
+    await harness.runtime.handle_dm(harness.ctx, "hello")
+    assert harness.bot.sent == []
+    assert harness.hermes.stream_calls == []
+    assert harness.ack.cancelled >= 1
+
+
+# -- errors / replies ----------------------------------------------------------
 
 
 async def test_hermes_error_sends_error_dm(test_hex):
     harness = make_harness(
         allow_hex=test_hex,
-        results=[HermesError("gateway down")],
+        submissions=[HermesError("gateway down")],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
     reply = harness.bot.sent[-1][1]
@@ -193,15 +263,13 @@ async def test_long_reply_is_chunked(test_hex):
 async def test_session_gone_is_recreated_and_retried(test_hex):
     harness = make_harness(
         allow_hex=test_hex,
-        results=[
-            HermesSessionGone("gone"),
-            TurnResult("recovered", status="completed"),
-        ],
+        submissions=[HermesSessionGone("gone"), None],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
-    assert len(harness.hermes.run_calls) == 2
-    assert harness.bot.sent[-1][1] == "recovered"
+    assert len(harness.hermes.submit_calls) == 2
+    assert harness.bot.sent[-1][1] == "hello"
     assert harness.sessions.get("atlas").hermes_session_id is not None
+    assert harness.hermes.ensure_calls == ["atlas", "atlas"]
 
 
 async def test_command_reply_is_chunked_if_long(test_hex):
