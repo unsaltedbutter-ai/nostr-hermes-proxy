@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for ~/Library/LaunchAgents/ai.unsaltedbutter.nostr-hermes-proxy.plist.
+
+  Replace /Users/YOUR_USER and the repo path. Secrets live in a 0600 env file
+  (~/.config/nostr-hermes-proxy/env) sourced by the wrapper command below:
+  the EnvironmentVariables block is only a fallback for an env-file-less setup,
+  and the sourced file overwrites these placeholders. NEVER commit real keys.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.unsaltedbutter.nostr-hermes-proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; [ -f "$HOME/.config/nostr-hermes-proxy/env" ] &amp;&amp; . "$HOME/.config/nostr-hermes-proxy/env"; exec "$HOME/nostr-hermes-proxy/venv/bin/python" -m nostr_hermes_proxy --config "$HOME/.config/nostr-hermes-proxy/config.toml"</string>
+  </array>
+
+  <!-- Convenience fallback only. Prefer the 0600 env file referenced above. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HERMES_API_KEY</key>
+    <string>REPLACE_WITH_HERMES_API_KEY</string>
+    <key>NSEC_ATLAS</key>
+    <string>REPLACE_WITH_NSEC_ATLAS</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USER/nostr-hermes-proxy</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/nostr-hermes-proxy.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/nostr-hermes-proxy.err.log</string>
+</dict>
+</plist>

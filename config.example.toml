@@ -1,0 +1,44 @@
+# nostr-hermes-proxy configuration example.
+#
+# Copy to ~/.config/nostr-hermes-proxy/config.toml (chmod 600) and replace the
+# placeholders. Never put an nsec in this file: secrets are environment
+# variables expanded from ${VAR} (see the LaunchAgent's 0600 env file).
+#
+# Required environment:
+#   HERMES_API_KEY   the Hermes gateway's API_SERVER_KEY value
+#   NSEC_<NAME>      one nsec per personality (e.g. NSEC_ATLAS)
+
+hermes_url = "http://127.0.0.1:8642"
+
+# The owner's mobile npub. Exactly one sender is allowed per personality;
+# everyone else is dropped and logged. Accepts npub1... or 64-char hex.
+allow_npub = "npub1REPLACE_WITH_OWNER_NPUB"
+
+# 0 = ack immediately on accept. N > 0 = ack only if no reply within N seconds.
+ack_delay_seconds = 3
+
+# Defaults to ~/.local/state/nostr-hermes-proxy/
+# state_dir = "~/.local/state/nostr-hermes-proxy"
+
+# Optional defaults shared by every personality. The first relay should be
+# nos.lol; relay hygiene orders it first automatically.
+# relays = ["wss://nos.lol", "wss://relay.damus.io"]
+
+# Watchdog knobs. The proxy polls each bot every interval; after N consecutive
+# unhealthy cycles it exits so the LaunchAgent can restart it. Bots without
+# health hooks (nostrbot-sdk v0.5.2) are reported as "no health hook".
+# watchdog_interval_seconds = 60
+# watchdog_failure_threshold = 3
+# watchdog_stall_seconds = 7200
+
+[[personality]]
+name = "atlas"
+nsec = "${NSEC_ATLAS}"
+relays = ["wss://nos.lol", "wss://relay.damus.io"]
+# model = "anthropic/claude-sonnet-4"
+# provider = "openrouter"
+
+# [[personality]]
+# name = "hermes"
+# nsec = "${NSEC_HERMES}"
+# relays = ["wss://nos.lol", "wss://relay.damus.io"]
