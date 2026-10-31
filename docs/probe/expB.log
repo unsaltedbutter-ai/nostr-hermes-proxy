@@ -1,4 +1,4 @@
-1793480289.712 bot pubkey hex = <redacted-bot-pubkey-hex>
+1793480289.712 bot pubkey hex = <redacted-bot-pubkey>
 1793480289.712 bot npub       = <redacted-bot-npub>
 1793480290.458 [B1-limit0-noSince] connected
 1793480290.458 [B1-limit0-noSince] filter={"kinds":[1059],"limit":0,"#p":["<redacted-bot-pubkey-hex>"]}
