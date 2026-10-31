@@ -66,7 +66,7 @@ session mapping keeping each conversation separate.
 | **Tool verbosity** | From the turn's SSE stream: omit entirely, or one-line summary (tools used, duration, failures). Precedent: hermes-nostr's `format_tool_event` returns None — on Nostr every tool event would be its own gift wrap |
 | **Reply chunking** | ~4096 chars, code-fence-aware `(1/N)` splitting — port from gateway core's `truncate_message` (NOT in hermes-nostr or nostrbot-sdk) |
 | **Relay hygiene** | See §7 — the INCIDENTS.md remediations |
-| **Watchdog** | nostrbot-sdk has **no hung-loop stall detection** (Incident 1). Port the watchdog from hermes-nostr `adapter.py` (stall detection → soft reconnect → escalation to full rebuild) or upstream it into the SDK |
+| **Watchdog** | ✅ SDK v0.6.0 ships the Incident-1 hooks (`health_check()`, `restart()`, `watchdog_stall_seconds`); the proxy `Watchdog` polls per personality (60 s), restarts unhealthy bots, and after N failures escalates to process exit so the LaunchAgent restarts us. The proxy's `watchdog_stall_seconds` is plumbed into each bot's SDK config so the SDK's `health_check()` is the single source of truth |
 | **Error paths** | `run.failed` / `run.cancelled` / `tool.failed`-aborted turns → send an error DM rather than silence |
 
 ## 4. Verified Hermes API contract (checked against live docs 2026-10-31)
@@ -147,58 +147,65 @@ Non-command text always goes to Hermes verbatim.
 - **Per-relay silence logging**: "nothing received in N min" per relay, so a
   dead subscription is visible (OPTIONS.md trade-off note).
 - Lookback/dedup on reconnect per the SDK's existing behavior; verify the
-  `.limit(0)` replay semantics on reconnect so a fresh daemon doesn't replay
-  history (open question §9).
+  `.limit(0)` replay semantics so a fresh daemon doesn't replay history
+  (open question §9). **Privacy note (probe finding):** NIP-59 protects the
+  payload only — gift-wrap *metadata* (recipient `#p`, volume, timing) is
+  world-readable; a throwaway key could observe all 393 of the bot's gift
+  wraps in nos.lol's retention. Inherent to NIP-59; assume DM metadata is
+  public when choosing relays.
 
-## 8. Workstream: nostrbot-sdk upgrade to nostr-sdk 0.45.x
+## 8. Workstream: nostrbot-sdk upgrade to nostr-sdk 0.45.x — ✅ DONE
 
-PyPI `nostr-sdk` latest stable: **0.45.1** (2026-08-19; 0.45.0 final
-2026-08-05). nostrbot-sdk 0.5.1 pins `==0.44.2`; hermes-nostr already runs
-`>=0.45.0a7,<0.46`. Upgrade benefits:
+Shipped as **nostrbot-sdk v0.6.0** (2026-10-31, tag `v0.6.0`, branch merged to
+`main`). The 0.44→0.45 migration had already landed upstream at v0.5.2; this
+release aligned the pin to stable `>=0.45.1,<0.46`, fixed the residual
+alpha→stable API drift (`Tag.to_vec()`, list-returning `Event.tags()`, sync
+`nip04_encrypt`), and added:
 
-1. **NIP-40 expiration on the *outside* of gift wraps** — on 0.44 the tag can
-   only live inside the rumor, which relays can't see, so wraps are never
-   garbage-collected. hermes-nostr's `dm_expiration_tag` +
-   `nip59_make_gift_wrap_async(extra_tags=[exp_tag])` is the reference
-   pattern. The Rust fork (`unsaltedbutter-ai/nostr`, branch
-   `feat/nip17-expiration`, commit `c3a749a1`) already adds NIP-40 expiration
-   to the gift-wrap/DM builders upstream of the bindings.
-2. Moves both consumers onto the **supported stable binding generation**
-   (wheels for macOS arm64/x86_64 and common Linux targets) instead of an
-   alpha-era divergence.
-3. One API generation across hermes-nostr + nostrbot-sdk — the incident
-   debugging playbook (`UnwrappedGift.from_gift_wrap_async`) matches
-   everywhere.
+1. **NIP-40 expiration on the *outside* of gift wraps** — already in v0.5.2.
+2. **Watchdog hooks**: `NostrBotConfig.watchdog_stall_seconds`,
+   `NostrBot.health_check()`, `NostrBot.restart()` (soft reconnect, no
+   identity-event republish), `NostrBot.last_activity_monotonic` — the
+   Incident-1 failure class is now detectable at library level.
+3. **`SenderContext.event_id`** — the outer gift-wrap id, used by the proxy
+   as the HTTP `Idempotency-Key`.
+4. **Bounded gift-wrap replay window** (`gift_wrap_lookback_seconds`, default
+   49 h) — see open question 3 below.
 
-**Plan:** do it in the nostrbot-sdk repo as its own release (per the SDK
-primer's ship process): bump pin, adapt `bot.py` call sites (sync
-`UnwrappedGift.from_gift_wrap` → `_async` variant, signer-less `Client`,
-`ReqTarget` subscriptions), run the 167-test battery + consumer tests
-(orchestrator 510, tts_bot 275), tag, bump consumer pins.
+Test battery: **234 passing** in the SDK repo. Consumer pins (orchestrator /
+tts_bot on the other machine, `nostrmix-bot` locally) still need bumping to
+v0.6.0 — noted as follow-up for their maintainers.
 
-**Decoupling rule:** the proxy targets the nostrbot-sdk public API
-(`NostrBot` / `on_dm` / `send_dm` / `Dedup`), which is version-agnostic —
-proxy work proceeds in parallel; `send_dm`'s expiration semantics improve for
-free post-upgrade. Do not couple the proxy's delivery path to the SDK version
-bump (the INCIDENTS.md lesson: version churn and delivery changes must not
-land together).
+## 9. Open questions (status)
 
-## 9. Open questions (verify before/during implementation)
-
-1. `Idempotency-Key` on `/api/sessions/{id}/chat` — undocumented; if
-   unsupported, use `/v1/runs` (durable, documented) or
-   `/v1/chat/completions` + `X-Hermes-Session-Id`.
+1. `Idempotency-Key` on `/api/sessions/{id}/chat` — **still unverified**;
+   blocked on enabling the gateway's API server (operator action:
+   `API_SERVER_ENABLED=true` + `API_SERVER_KEY=…` in `~/.hermes/.env`, then a
+   gateway restart). The proxy already sends the header unconditionally (key
+   = `ctx.event_id`, the outer gift-wrap id), so the answer changes behavior,
+   not code. If session-chat ignores it, pivot to `/v1/runs` (durable,
+   documented) or `/v1/chat/completions` + `X-Hermes-Session-Id`.
 2. Exact behavior of a second concurrent turn on one session (lease waits vs
-   409) — proxy serializes per personality regardless; confirm the failure
-   mode for safety.
-3. `.limit(0)` subscription semantics on reconnect — confirm no history
-   replay / no gap (SDK comment says "receive new ones only"; verify what a
-   relay actually serves after a reconnect, and whether a fresh daemon with an
-   empty dedup set could replay old DMs).
+   409) — same blocker. The proxy serializes per personality regardless;
+   confirm the failure mode for safety.
+3. `.limit(0)` subscription replay semantics — **ANSWERED** (empirical probe
+   against `nos.lol`, 2026-10-31; scripts+logs under
+   `/var/tmp/opencode/nostr-probe/`). Verdict: nos.lol serves **zero stored
+   events** for `limit:0` (fresh subscribe and after reconnects) while live
+   frames flow normally — 393 stored gift wraps for the bot's npub exist in
+   retention and were served only on no-limit filters, so a cold-started
+   daemon would NOT replay history on nos.lol. Caveat: NIP-01 does not
+   define `limit:0`; relays that treat `0` as unlimited would replay their
+   full retention. Shipped as nostrbot-sdk v0.6.0
+   `gift_wrap_lookback_seconds` (default 49 h): any replay is capped at the
+   window and absorbed by dedup.
 4. Hermes session durability across gateway restarts/updates (the session map
-   assumes it); handle mapped-session-gone (`not_found`) by recreating.
-5. Where the per-personality nsecs live (LaunchAgent env file with 0600 perms
-   vs keychain); never in the repo.
+   assumes it) — deferred; the proxy already handles mapped-session-gone
+   (`not_found`) by recreating and retrying the same `Idempotency-Key`.
+5. Where the per-personality nsecs live — **decided**: `${ENV}`-interpolated
+   into `config.toml`, values provided via the LaunchAgent (0600-perm env
+   file); `config.example.toml` carries placeholders only, and a test asserts
+   no literal `nsec1` values are committed.
 
 ## 10. Configuration sketch (draft)
 

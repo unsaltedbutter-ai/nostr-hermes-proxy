@@ -1,0 +1,31 @@
+1793480182.461 === Experiment A v2 start; pubkey=e6fa3699f579617ed0c26bafe87596f016fe7b90854dc47a113e6bdf4f7b337c; marker='ndk-probe-1793480182-286824a5'
+1793480183.158 [c1] connected
+1793480183.362 [c1-baseline] filter={"authors":["e6fa3699f579617ed0c26bafe87596f016fe7b90854dc47a113e6bdf4f7b337c"],"kinds":[1],"limit":0}
+1793480183.362 [c1-baseline] subscribe -> SubscribeOutput(id=1a0df39aea67117adf18b826acb8359d, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480183.542 [c1] EOSE sub=1a0df39aea67 t=1793480183.542
+1793480188.363 [VERDICT baseline] fresh-subscribe served 0 event(s) in 5s (fresh key: expect 0)
+1793480188.363 [c1] publishing marker: 'ndk-probe-1793480182-286824a5'
+1793480188.543 [c1] publish ok, marker_id=cce41875803a8534590dccd387f2fbc1884801aa6e73b645c5a38258ed059bf6
+1793480188.544 [c1] OK id=cce41875803a8534 status=True msg=''
+1793480188.615 [c1] EVENT(msg) sub=1a0df39aea67 id=cce41875803a8534590dccd387f2fbc1884801aa6e73b645c5a38258ed059bf6 created_at=1793480188 content='ndk-probe-1793480182-286824a5'
+1793480189.046 [VERDICT live] marker arrived on live .limit(0) sub: True latency=0.5s total_seen=1
+1793480189.047 [c1] disconnected + shutdown
+1793480191.751 [c2] connected
+1793480191.953 [c2-reconnect1] filter={"authors":["e6fa3699f579617ed0c26bafe87596f016fe7b90854dc47a113e6bdf4f7b337c"],"kinds":[1],"limit":0}
+1793480191.953 [c2-reconnect1] subscribe -> SubscribeOutput(id=9b5c0a8f475f2badecbbbdf62f40b653, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480192.172 [c2] EOSE sub=9b5c0a8f475f t=1793480192.172
+1793480206.955 [VERDICT reconnect1] served 0 event(s); marker_replayed=0
+1793480206.956 [c2] disconnected + shutdown
+1793480209.651 [c3] connected
+1793480209.855 [c3-reconnect2] filter={"authors":["e6fa3699f579617ed0c26bafe87596f016fe7b90854dc47a113e6bdf4f7b337c"],"kinds":[1],"limit":0}
+1793480209.855 [c3-reconnect2] subscribe -> SubscribeOutput(id=74b080c6eabfd7bb92a10083b4c950d4, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480210.016 [c3] EOSE sub=74b080c6eabf t=1793480210.016
+1793480224.857 [VERDICT reconnect2] served 0 event(s); marker_replayed=0
+1793480224.858 [c3] disconnected + shutdown
+1793480227.553 [c4] connected
+1793480227.756 [c4-since-control] filter={"authors":["e6fa3699f579617ed0c26bafe87596f016fe7b90854dc47a113e6bdf4f7b337c"],"kinds":[1],"since":1793480197,"limit":0}
+1793480227.757 [c4-since-control] subscribe -> SubscribeOutput(id=3523ef99cb739a47b029e61365523338, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480227.918 [c4] EOSE sub=3523ef99cb73 t=1793480227.918
+1793480242.759 [VERDICT since-control] served 0 event(s); marker_replayed=0
+1793480242.759 [c4] disconnected + shutdown
+1793480242.759 === Experiment A v2 done. marker='ndk-probe-1793480182-286824a5' id=cce41875803a8534590dccd387f2fbc1884801aa6e73b645c5a38258ed059bf6

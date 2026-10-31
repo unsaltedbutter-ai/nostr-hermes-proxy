@@ -220,3 +220,50 @@ async def test_start_and_stop_are_delegated(test_hex):
     assert bot.dm_handler == harness.runtime.handle_dm
     await harness.runtime.stop()
     assert bot.stopped == 1
+
+
+def test_build_bot_passes_watchdog_stall_seconds(test_hex, monkeypatch):
+    """nostrbot-sdk >= 0.6.0 performs stall detection inside health_check()
+    when NostrBotConfig.watchdog_stall_seconds is set. The runtime must plumb
+    the proxy-level knob into the bot config so the SDK's health_check() is
+    the single source of truth the process watchdog polls."""
+    captured: dict = {}
+
+    class _FakeConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class _FakeBot:
+        def __init__(self, config):
+            captured["bot_config"] = config
+
+        def on_dm(self, handler):
+            pass
+
+    import nostrbot_sdk
+
+    monkeypatch.setattr(nostrbot_sdk, "NostrBot", _FakeBot)
+    monkeypatch.setattr(nostrbot_sdk, "NostrBotConfig", _FakeConfig)
+
+    from nostr_hermes_proxy.config import PersonalityConfig
+    from nostr_hermes_proxy.personality import PersonalityRuntime
+    from nostr_hermes_proxy.sessions import SessionMap
+    from .fakes import FakeAckPolicy, FakeHermes
+
+    config = PersonalityConfig(
+        name="atlas",
+        nsec="nsec1synthetictestkeynotreal",
+        relays=("wss://nos.lol",),
+        model=None,
+        provider=None,
+    )
+    PersonalityRuntime(
+        config,
+        allow_hex=test_hex,
+        hermes=FakeHermes(SessionMap(None)),
+        sessions=SessionMap(None),
+        ack_policy=FakeAckPolicy(),
+        watchdog_stall_seconds=7200.0,
+    )
+    assert captured["watchdog_stall_seconds"] == 7200.0
+    assert captured["bot_config"] is not None

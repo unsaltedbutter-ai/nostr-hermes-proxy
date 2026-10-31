@@ -51,6 +51,7 @@ class PersonalityRuntime:
         hermes: HermesClient,
         sessions: SessionMap,
         ack_policy: AckPolicy,
+        watchdog_stall_seconds: float | None = None,
         bot: Any | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -60,6 +61,7 @@ class PersonalityRuntime:
         self.hermes = hermes
         self.sessions = sessions
         self.ack_policy = ack_policy
+        self._watchdog_stall_seconds = watchdog_stall_seconds
         self._clock = clock or time.time
         self._turn_lock = asyncio.Lock()
         self._waiting = 0
@@ -78,6 +80,10 @@ class PersonalityRuntime:
             nsec=self.config.nsec,
             relays=list(self.config.relays),
             profile={"name": self.config.name},
+            # SDK-level stall detection (nostrbot-sdk >= 0.6.0): feeds
+            # health_check(), which the process watchdog polls. None keeps
+            # the SDK default (disabled) for injected fakes / older SDKs.
+            watchdog_stall_seconds=self._watchdog_stall_seconds,
         )
         return NostrBot(bot_config)
 

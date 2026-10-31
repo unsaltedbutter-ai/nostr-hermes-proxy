@@ -1,0 +1,14 @@
+1793480289.712 bot pubkey hex = <redacted-bot-pubkey-hex>
+1793480289.712 bot npub       = <redacted-bot-npub>
+1793480290.458 [B1-limit0-noSince] connected
+1793480290.458 [B1-limit0-noSince] filter={"kinds":[1059],"limit":0,"#p":["<redacted-bot-pubkey-hex>"]}
+1793480290.459 [B1-limit0-noSince] subscribe -> SubscribeOutput(id=8b6805def330387c176d0f78ee8f7c3a, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480290.785 [B1-limit0-noSince] EOSE sub=8b6805def330 t=1793480290.785
+1793480310.461 [VERDICT B1-limit0-noSince] served 0 gift wrap(s) in 20s
+1793480310.463 --- phase1 done: 0 events; pausing 3s before phase 2
+1793480314.168 [B2-limit0-since30] connected
+1793480314.168 [B2-limit0-since30] filter={"kinds":[1059],"since":1793480284,"limit":0,"#p":["<redacted-bot-pubkey-hex>"]}
+1793480314.169 [B2-limit0-since30] subscribe -> SubscribeOutput(id=28325240ae9d49b59da4a9a1255d2e2f, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480314.563 [B2-limit0-since30] EOSE sub=28325240ae9d t=1793480314.563
+1793480334.171 [VERDICT B2-limit0-since30] served 0 gift wrap(s) in 20s
+1793480334.172 === Experiment B done: limit0-noSince=0, limit0-since30=0

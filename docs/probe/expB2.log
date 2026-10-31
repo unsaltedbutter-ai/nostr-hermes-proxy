@@ -1,0 +1,12 @@
+1793480378.683 connected
+1793480379.034 [ctrl1-marker-by-id] filter={"ids":["cce41875803a8534590dccd387f2fbc1884801aa6e73b645c5a38258ed059bf6"]} -> 1 event(s)
+1793480379.034 [ctrl1-marker-by-id] oldest=1793480188 newest=1793480188 span_days=0.00 now=1793480379
+1793480379.035 [ctrl1-marker-by-id]   sample id=cce41875803a8534 kind=1 created_at=1793480188
+1793480379.492 [ctrl2-expA-author-nolimit] filter={"authors":["e6fa3699f579617ed0c26bafe87596f016fe7b90854dc47a113e6bdf4f7b337c"],"kinds":[1]} -> 1 event(s)
+1793480379.492 [ctrl2-expA-author-nolimit] oldest=1793480188 newest=1793480188 span_days=0.00 now=1793480379
+1793480379.492 [ctrl2-expA-author-nolimit]   sample id=cce41875803a8534 kind=1 created_at=1793480188
+1793480380.646 [ctrl3-bot-gw-7d-nolimit] filter={"kinds":[1059],"since":1792875579,"#p":["<redacted-bot-pubkey-hex>"]} -> 393 event(s)
+1793480380.650 [ctrl3-bot-gw-7d-nolimit] oldest=1792987485 newest=1793474941 span_days=5.64 now=1793480380
+1793480380.650 [ctrl3-bot-gw-7d-nolimit]   sample id=f92a39992c97ad7a kind=1059 created_at=1793474941
+1793480380.650 [ctrl3-bot-gw-7d-nolimit]   sample id=9c25ed29ca72f157 kind=1059 created_at=1793463689
+1793480380.650 [ctrl3-bot-gw-7d-nolimit]   sample id=02c6a6d37420d703 kind=1059 created_at=1793439440

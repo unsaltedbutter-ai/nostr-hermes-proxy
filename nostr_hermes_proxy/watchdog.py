@@ -1,14 +1,16 @@
 """Process-local supervision for each personality's NostrBot.
 
-nostrbot-sdk v0.5.2 has no health/restart hooks and no hung-loop stall
-detection (the INCIDENTS.md failure class). This watchdog polls observable
-health when the hooks exist and stays inert when they don't, so the proxy runs
-on v0.5.2 today and lights up after the SDK branch lands.
+nostrbot-sdk v0.6.0 ships the hooks this watchdog consumes:
+``health_check()`` (notification loop alive, a relay connectable, and — when
+``NostrBotConfig.watchdog_stall_seconds`` is set — no stalled frame window)
+and ``restart()`` (soft reconnect without republishing identity events).
+The personality runtime plumbs the proxy's ``watchdog_stall_seconds`` config
+into the bot so the SDK's health_check() performs stall detection itself.
 
-Supported duck-typed hooks on ``bot``:
-  * ``health_check()`` (sync or async) -> bool / dict
-  * ``restart()`` (sync or async)
-  * ``last_activity_monotonic`` (attribute or callable) -> monotonic seconds
+For bots without the hooks (older SDKs or test fakes) this watchdog degrades
+gracefully: with only ``last_activity_monotonic`` it applies its own
+``stall_seconds`` window; with neither hook it marks the personality
+unmonitored ("no health hook") and stays inert.
 
 On an unhealthy poll: log, call ``restart()`` if present, and after N
 consecutive failed cycles escalate to a full process exit so the LaunchAgent

@@ -42,12 +42,16 @@ Hermes gateway API server (one persistent session per personality)
 
 ## Foundation
 
-Built on [`nostrbot-sdk`](https://github.com/unsaltedbutter-ai/nostrbot-sdk),
-which wraps the `nostr-sdk` bindings and already handles the NIP-17 footguns
+Built on [`nostrbot-sdk`](https://github.com/unsaltedbutter-ai/nostrbot-sdk) ≥
+v0.6.0 (pinned), which wraps the `nostr-sdk` stable bindings (≥ 0.45.1) and
+already handles the NIP-17 footguns
 (kind-1059 subscriptions, dedup, per-user locks, protocol-matched DMs,
-NIP-40 expiration, kind-10050 inbox publication). The proxy is policy and
+NIP-40 expiration, kind-10050 inbox publication, hung-loop
+`health_check()`/`restart()` hooks, and a bounded gift-wrap replay window).
+The proxy is policy and
 glue: Hermes HTTP client, session mapping, commands, ack/verbosity policy,
-relay hygiene, and a hung-loop watchdog.
+relay hygiene, and the process-level watchdog that escalates to a LaunchAgent
+restart.
 
 ## Docs
 

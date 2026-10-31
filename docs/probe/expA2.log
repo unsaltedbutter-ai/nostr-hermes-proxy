@@ -1,0 +1,11 @@
+1793480093.429 pubkey=9f5ddbb7db0d0b55c58dd04b64fa609a17a4ceb8c61686c8ddd4ddff169d066e marker2='ndk-probe-b-1793480093-cab07849'
+1793480094.121 connected
+1793480094.122 filter(no limit) json: {"authors":["9f5ddbb7db0d0b55c58dd04b64fa609a17a4ceb8c61686c8ddd4ddff169d066e"],"kinds":[1]}
+1793480094.122 subscribed -> SubscribeOutput(id=9df15d9c28212e7dde77561307c37a9d, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480094.444 [nolimit] MSG RelayMessage { inner: EndOfStoredEvents(SubscriptionId("9df15d9c28212e7dde77561307c37a9d")) }
+1793480097.124 publishing marker2: 'ndk-probe-b-1793480093-cab07849'
+1793480097.290 published marker2 id=SendEventOutput(id=EventId { inner: EventId(e7364423a2dc5f50655bdd3a96188a2fd1e8efde64eff2887e543fd41ec67a12) }, success=[RelayUrl { inner: RelayUrl("wss://nos.lol") }], failed={})
+1793480097.290 [nolimit] MSG RelayMessage { inner: Ok { event_id: EventId(e7364423a2dc5f50655bdd3a96188a2fd1e8efde64eff2887e543fd41ec67a12), status: 
+1793480097.323 [nolimit] MSG RelayMessage { inner: Event { subscription_id: SubscriptionId("9df15d9c28212e7dde77561307c37a9d"), event: Event { id: Ev
+1793480107.323 [VERDICT nolimit] live arrival of marker2: False (total events on sub: 0)
+1793480107.324 fetch_events failed: TypeError('Expected EventId instance, str found')
