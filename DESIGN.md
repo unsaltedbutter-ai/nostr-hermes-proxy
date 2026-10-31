@@ -32,10 +32,18 @@ The proxy hosts **N simultaneous conversations, each with a unique `nsec`**:
   instance, subscription, dedup set, locks, kind-10050 list).
 - Every personality allows exactly **one sender npub** (the owner's mobile
   npub). Deny-by-default; any other sender is dropped and logged.
-- **No concurrency within a personality by design** (one human DMs one
-  identity) — but the proxy still serializes turns per personality: a
-  multi-minute Hermes turn must not block the notification loop or corrupt
-  state if a second DM arrives meanwhile (queue it, don't run it).
+- **One conversation per personality, growing until the other party sends
+  `/new`.** The Hermes session is long-lived and spans many Nostr messages;
+  the SessionMap's persistent session id — never a message id — anchors it.
+  Multiple nsec run in one process; separate proxy instances (separate
+  config/state dirs) also work but are unnecessary.
+- **A second DM mid-turn should *steer*, not queue** (decision 2026-10-31):
+  forward the new text into the in-flight Hermes turn via
+  `POST /v1/runs/{run_id}/steer` rather than holding it in line. That
+  requires submitting turns via `/v1/runs` and capturing the `run_id` —
+  gated on the live-gateway probes in `docs/hermes-gateway-setup.md`
+  (Probe C). Until steering lands, the MVP queues the message per
+  personality (asyncio lock) and runs it after the current turn completes.
 
 Personality = identity + Hermes session. Personalities are a clean way to get
 "channels" — e.g. one nsec per project or per agent persona — with the
@@ -111,7 +119,8 @@ DM arrives on personality P (allowlisted sender)
   → dedup (SDK) → unwrap → allowlist check → persist seen
   → send ack (per policy)
   → command? → handle locally (reply, no Hermes turn)
-  → enqueue turn (per-personality serial queue)
+  → turn in flight? steer it (POST /v1/runs/{id}/steer) : submit turn
+    (MVP: per-personality queue; steering gated on Probe C)
   → Hermes: ensure session (map hit, else POST /api/sessions)
   → POST /api/sessions/{sid}/chat/stream {input, model?, provider?}
   → collect SSE: final text from assistant deltas; tool events → summary or omit
@@ -179,29 +188,49 @@ v0.6.0 — noted as follow-up for their maintainers.
 ## 9. Open questions (status)
 
 1. `Idempotency-Key` on `/api/sessions/{id}/chat` — **still unverified**;
-   blocked on enabling the gateway's API server (operator action:
-   `API_SERVER_ENABLED=true` + `API_SERVER_KEY=…` in `~/.hermes/.env`, then a
-   gateway restart). The proxy already sends the header unconditionally (key
-   = `ctx.event_id`, the outer gift-wrap id), so the answer changes behavior,
-   not code. If session-chat ignores it, pivot to `/v1/runs` (durable,
-   documented) or `/v1/chat/completions` + `X-Hermes-Session-Id`.
-2. Exact behavior of a second concurrent turn on one session (lease waits vs
-   409) — same blocker. The proxy serializes per personality regardless;
-   confirm the failure mode for safety.
+   blocked on enabling the gateway's API server (see
+   `docs/hermes-gateway-setup.md`, Probe A). Clarified decision: the gift-wrap
+   event id is a **per-request** `Idempotency-Key` only — it never
+   participates in session identity. Sessions are long-lived ids minted via
+   `POST /api/sessions` and held in the SessionMap until `/new`; they span
+   many Nostr messages. If session-chat ignores the header, pivot to
+   `/v1/runs` (durable, documented) or `/v1/chat/completions` +
+   `X-Hermes-Session-Id`. The proxy sends the header unconditionally, so the
+   answer changes behavior, not code.
+2. Second DM mid-turn — **decision: steer, don't queue** (2026-10-31). The
+   docs confirm a `steer` control route on runs
+   (`POST /v1/runs/{run_id}/steer`); contract details (body schema, accepted
+   timing) need live verification — Probe C in
+   `docs/hermes-gateway-setup.md`. Consequence: turn submission moves from
+   `/api/sessions/{id}/chat/stream` to `POST /v1/runs` (+ events stream) so
+   the proxy holds the `run_id`. Current MVP queues per personality until
+   steering is verified; the queue remains the fallback when no turn is
+   steer-able (e.g., race where the turn completed).
 3. `.limit(0)` subscription replay semantics — **ANSWERED** (empirical probe
    against `nos.lol`, 2026-10-31; scripts+logs under
-   `/var/tmp/opencode/nostr-probe/`). Verdict: nos.lol serves **zero stored
-   events** for `limit:0` (fresh subscribe and after reconnects) while live
-   frames flow normally — 393 stored gift wraps for the bot's npub exist in
-   retention and were served only on no-limit filters, so a cold-started
-   daemon would NOT replay history on nos.lol. Caveat: NIP-01 does not
-   define `limit:0`; relays that treat `0` as unlimited would replay their
-   full retention. Shipped as nostrbot-sdk v0.6.0
-   `gift_wrap_lookback_seconds` (default 49 h): any replay is capped at the
-   window and absorbed by dedup.
-4. Hermes session durability across gateway restarts/updates (the session map
-   assumes it) — deferred; the proxy already handles mapped-session-gone
-   (`not_found`) by recreating and retrying the same `Idempotency-Key`.
+   `docs/probe/`, write-up in `docs/relay-replay-probe.md`). Verdict: nos.lol
+   serves **zero stored events** for `limit:0` (fresh subscribe and after
+   reconnects) while live frames flow normally — 393 stored gift wraps for
+   the bot's npub exist in retention and were served only on no-limit
+   filters, so a cold-started daemon would NOT replay history on nos.lol.
+   Caveat: NIP-01 does not define `limit:0`; relays that treat `0` as
+   unlimited would replay their full retention. Shipped as nostrbot-sdk
+   v0.6.0 `gift_wrap_lookback_seconds` (default 49 h): any replay is capped
+   at the window and absorbed by dedup. Dedup design note: duplicate
+   detection is already two layers deep on the **gift-wrap event id** —
+   (a) the SDK's in-memory `Dedup` and (b) the Hermes `Idempotency-Key`.
+   A text+time hash would be strictly weaker: NIP-59 deliberately fuzzes
+   `created_at` up to 48 h, so "sent time" is not a trustworthy
+   distinguisher, and the event id is cryptographically unique per
+   redelivery. Rapid repeat `/new` is harmless — each creates a session and
+   the map's last write wins.
+4. Hermes session durability across gateway restarts — matches the
+   implementation: the SessionMap persists atomically and survives proxy
+   restarts; on mapped-session-gone (`not_found`) the proxy recreates and
+   retries the same `Idempotency-Key`. Whether Hermes sessions themselves
+   survive a gateway restart is **Probe D** in
+   `docs/hermes-gateway-setup.md`; if they don't, the 404-recreate path
+   already covers it.
 5. Where the per-personality nsecs live — **decided**: `${ENV}`-interpolated
    into `config.toml`, values provided via the LaunchAgent (0600-perm env
    file); `config.example.toml` carries placeholders only, and a test asserts
