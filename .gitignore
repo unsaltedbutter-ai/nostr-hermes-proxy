@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+dist/
+build/
+
+# Secrets — never commit keys or API tokens
+.env
+.env.*
+*.key
+secrets/
+
+# Local config with secrets interpolated from env is fine; local-only overrides are not
+config.local.toml
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
