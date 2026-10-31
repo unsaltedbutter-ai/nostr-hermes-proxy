@@ -112,6 +112,15 @@ Auth: `Authorization: Bearer $API_SERVER_KEY` on `http://127.0.0.1:8642`.
   writers. The proxy serializes per personality regardless and backs off on
   429/409.
 
+**Live-probe addendum (2026-10-31, gateway v0.22.5, PID 5324):** session-chat
+**ignores** `Idempotency-Key` (Probe A — keyed retry ran a full new turn);
+concurrent same-session chats **serialize** cleanly, no 409/429 (B);
+**steering works**: `POST /v1/runs/{run_id}/steer` body `{"input": "…"}` →
+`{"accepted": true}` and the final output reflected the steer (C); **sessions
+and full history survive a gateway restart** (D — 13/13 messages intact);
+`/v1/runs` idempotency is durable with 24 h retention; the session-chat
+stream's terminal `done` frame carries a `run_id`.
+
 ## 5. Message flow
 
 ```
@@ -119,8 +128,10 @@ DM arrives on personality P (allowlisted sender)
   → dedup (SDK) → unwrap → allowlist check → persist seen
   → send ack (per policy)
   → command? → handle locally (reply, no Hermes turn)
-  → turn in flight? steer it (POST /v1/runs/{id}/steer) : submit turn
-    (MVP: per-personality queue; steering gated on Probe C)
+  → turn in flight? steer it (POST /v1/runs/{id}/steer) — VERIFIED (Probe C)
+    : submit turn via POST /v1/runs (Idempotency-Key = gift-wrap event id;
+      durable 24h; a replayed key returns the original run_id → duplicate
+      dropped, the first delivery already replied)
   → Hermes: ensure session (map hit, else POST /api/sessions)
   → POST /api/sessions/{sid}/chat/stream {input, model?, provider?}
   → collect SSE: final text from assistant deltas; tool events → summary or omit
@@ -187,25 +198,22 @@ v0.6.0 — noted as follow-up for their maintainers.
 
 ## 9. Open questions (status)
 
-1. `Idempotency-Key` on `/api/sessions/{id}/chat` — **still unverified**;
-   blocked on enabling the gateway's API server (see
-   `docs/hermes-gateway-setup.md`, Probe A). Clarified decision: the gift-wrap
-   event id is a **per-request** `Idempotency-Key` only — it never
-   participates in session identity. Sessions are long-lived ids minted via
-   `POST /api/sessions` and held in the SessionMap until `/new`; they span
-   many Nostr messages. If session-chat ignores the header, pivot to
-   `/v1/runs` (durable, documented) or `/v1/chat/completions` +
-   `X-Hermes-Session-Id`. The proxy sends the header unconditionally, so the
-   answer changes behavior, not code.
-2. Second DM mid-turn — **decision: steer, don't queue** (2026-10-31). The
-   docs confirm a `steer` control route on runs
-   (`POST /v1/runs/{run_id}/steer`); contract details (body schema, accepted
-   timing) need live verification — Probe C in
-   `docs/hermes-gateway-setup.md`. Consequence: turn submission moves from
-   `/api/sessions/{id}/chat/stream` to `POST /v1/runs` (+ events stream) so
-   the proxy holds the `run_id`. Current MVP queues per personality until
-   steering is verified; the queue remains the fallback when no turn is
-   steer-able (e.g., race where the turn completed).
+1. `Idempotency-Key` on `/api/sessions/{id}/chat` — **ANSWERED (Probe A,
+   2026-10-31): ignored** — a keyed retry ran a full new turn (4.1 s then
+   1.7 s, no replay, no 409). Resolution per the original decision: the proxy
+   pivots to `/v1/runs`, whose idempotency is durable with 24 h retention
+   (`runs_idempotency: {supported: true, durable: true,
+   retention_seconds: 86400}`). The gift-wrap event id stays the
+   per-request key; session identity remains the SessionMap's persistent id
+   spanning many messages.
+2. Second DM mid-turn — **steering, VERIFIED (Probe C)**:
+   `POST /v1/runs/{run_id}/steer` with `{"input": "…"}` → 200
+   `{"accepted": true}`; final output visibly reflected the steer.
+   Implementation: turns are submitted via `POST /v1/runs` (+ events
+   stream), the in-flight `run_id` is tracked per personality, and a
+   mid-turn DM is steered; on refusal (turn already terminal) the DM falls
+   back to a new turn submission. Probe B (serialization) is the safety net.
+   Steered DMs get no ack — the running turn's reply covers them.
 3. `.limit(0)` subscription replay semantics — **ANSWERED** (empirical probe
    against `nos.lol`, 2026-10-31; scripts+logs under
    `docs/probe/`, write-up in `docs/relay-replay-probe.md`). Verdict: nos.lol
@@ -224,13 +232,11 @@ v0.6.0 — noted as follow-up for their maintainers.
    distinguisher, and the event id is cryptographically unique per
    redelivery. Rapid repeat `/new` is harmless — each creates a session and
    the map's last write wins.
-4. Hermes session durability across gateway restarts — matches the
-   implementation: the SessionMap persists atomically and survives proxy
-   restarts; on mapped-session-gone (`not_found`) the proxy recreates and
-   retries the same `Idempotency-Key`. Whether Hermes sessions themselves
-   survive a gateway restart is **Probe D** in
-   `docs/hermes-gateway-setup.md`; if they don't, the 404-recreate path
-   already covers it.
+4. Hermes session durability across gateway restarts — **ANSWERED (Probe
+   D): yes** — sessions and full history survive a gateway restart (13/13
+   messages intact post-restart, new PID). The SessionMap persists
+   atomically across proxy restarts; the `not_found` → recreate-and-retry
+   path remains as a safety net, not a requirement.
 5. Where the per-personality nsecs live — **decided**: `${ENV}`-interpolated
    into `config.toml`, values provided via the LaunchAgent (0600-perm env
    file); `config.example.toml` carries placeholders only, and a test asserts
