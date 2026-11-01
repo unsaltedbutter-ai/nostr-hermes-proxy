@@ -156,8 +156,16 @@ def unknown_text(name: str) -> str:
     return f"Unknown command {invoked}. Send /help for the command list."
 
 
-def model_set_text(model: str, provider: str | None) -> str:
-    return f"Model set to {format_model_label(model, provider)}."
+def model_set_text(
+    model: str,
+    provider: str | None = None,
+    context_total: int | None = None,
+) -> str:
+    """Switch confirmation; includes the model's context length when known."""
+    text = f"Model set to {format_model_label(model, provider)}."
+    if context_total is not None:
+        text += f" Context: {context_total:,} tokens."
+    return text
 
 
 def models_menu_text(

@@ -17,6 +17,7 @@ from typing import Any, Callable
 from .chunking import truncate_message
 from .commands import (
     MODEL_MENU_HINT,
+    NO_MODELS_TEXT,
     Command,
     error_text,
     help_text,
@@ -195,8 +196,7 @@ class PersonalityRuntime:
             logger.warning("Could not create session for %s: %s", self.name, exc)
             await self._send_chunks(ctx, error_text(self._error_detail(exc)))
             return
-        model = previous.model if previous else self.config.model
-        provider = previous.provider if previous else self.config.provider
+        model, provider = self._resolved_model(previous)
         self.sessions.reset(self.name)
         self.sessions.set(
             self.name, session_id, model=model, provider=provider,
@@ -207,24 +207,13 @@ class PersonalityRuntime:
 
     async def _command_model(self, ctx: Any, args: str) -> None:
         if not args:
-            menu = self._gateway_menu()
-            if menu is None:
-                try:
-                    options = await self.hermes.list_models()
-                except HermesError as exc:
-                    logger.warning(
-                        "Could not list models for %s: %s", self.name, exc,
-                    )
-                    await self._send_chunks(
-                        ctx, error_text(self._error_detail(exc)),
-                    )
-                    return
-                menu = [
-                    (option.provider, option.model)
-                    for option in options
-                    if getattr(option, "user_defined", False)
-                ]
-            self._model_menu = menu
+            menu, error_detail = await self._refresh_menu()
+            if not menu:
+                if error_detail is not None:
+                    await self._send_chunks(ctx, error_text(error_detail))
+                else:
+                    await self._send_chunks(ctx, NO_MODELS_TEXT)
+                return
             entry = self.sessions.get(self.name)
             await self._send_chunks(
                 ctx,
@@ -243,6 +232,11 @@ class PersonalityRuntime:
             return
         index = parse_model_index(args)
         if index is not None:
+            # The menu lives in memory, so a daemon restart clears it —
+            # rebuild it from the gateway config (or API fallback) on demand
+            # rather than making the user list models again.
+            if not self._model_menu:
+                self._model_menu, _ = await self._refresh_menu()
             if not self._model_menu:
                 await self._send_chunks(ctx, MODEL_MENU_HINT)
                 return
@@ -253,7 +247,12 @@ class PersonalityRuntime:
                 return
             provider, model = self._model_menu[index - 1]
             self.sessions.update_model(self.name, model, provider)
-            await self._send_chunks(ctx, model_set_text(model, provider))
+            await self._send_chunks(
+                ctx,
+                model_set_text(
+                    model, provider, self._context_total(model, provider),
+                ),
+            )
             return
         try:
             selection = parse_model_selection(args)
@@ -268,7 +267,12 @@ class PersonalityRuntime:
             self.name, selection.model, selection.provider,
         )
         await self._send_chunks(
-            ctx, model_set_text(selection.model, selection.provider),
+            ctx,
+            model_set_text(
+                selection.model,
+                selection.provider,
+                self._context_total(selection.model, selection.provider),
+            ),
         )
 
     def _gateway_menu(self) -> list[tuple[str | None, str]] | None:
@@ -291,6 +295,52 @@ class PersonalityRuntime:
             return None
         return list(models.menu)
 
+    async def _refresh_menu(
+        self,
+    ) -> tuple[list[tuple[str | None, str]], str | None]:
+        """Rebuild the model menu: gateway config.yaml first, API fallback.
+
+        Returns (menu, error_detail). The config.yaml read is live (no
+        caching); when it yields nothing the gateway API's user-defined
+        inventory is used. error_detail is set only when the API fallback
+        itself failed.
+        """
+        menu = self._gateway_menu()
+        if menu:
+            self._model_menu = menu
+            return menu, None
+        try:
+            options = await self.hermes.list_models()
+        except HermesError as exc:
+            logger.warning("Could not list models for %s: %s", self.name, exc)
+            self._model_menu = []
+            return [], self._error_detail(exc)
+        menu = [
+            (option.provider, option.model)
+            for option in options
+            if getattr(option, "user_defined", False)
+        ]
+        self._model_menu = menu
+        return menu, None
+
+    def _resolved_model(
+        self, entry: Any,
+    ) -> tuple[str | None, str | None]:
+        """The session's pinned model, or the gateway's default (fresh read)."""
+        model = entry.model if entry is not None else None
+        provider = entry.provider if entry is not None else None
+        if model:
+            return model, provider
+        if not self._gateway_config_path:
+            return None, None
+        try:
+            models: GatewayModels = read_gateway_models(
+                self._gateway_config_path,
+            )
+        except GatewayConfigError:
+            return None, None
+        return models.default_model, models.default_provider
+
     def _context_total(
         self, model: str | None, provider: str | None = None,
     ) -> int | None:
@@ -308,15 +358,12 @@ class PersonalityRuntime:
     def _status_text(self) -> str:
         entry = self.sessions.get(self.name)
         age: float | None = None
-        model = self.config.model
-        provider = self.config.provider
         consumed: int | None = None
         if entry is not None:
             if entry.hermes_session_id and entry.created_at:
                 age = max(0.0, self._clock() - entry.created_at)
-            model = entry.model
-            provider = entry.provider
             consumed = entry.last_input_tokens
+        model, provider = self._resolved_model(entry)
         return status_text(
             name=self.name,
             model=model,

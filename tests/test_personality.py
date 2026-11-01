@@ -248,6 +248,58 @@ async def test_model_menu_falls_back_to_api_without_gateway_config(test_hex):
     assert harness.hermes.models_calls == 1
 
 
+async def test_model_switch_after_restart_resolves_menu_and_context(
+    test_hex, tmp_path,
+):
+    """Post-restart, "/model 2" rebuilds the menu on demand — no /model first."""
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "providers:\n"
+        "  lspark:\n"
+        "    models:\n"
+        "      deepseek-v4.1-flash:\n"
+        "        context_length: 655360\n"
+        "  aspark:\n"
+        "    models:\n"
+        "      glm-5.3-flash:\n"
+        "        context_length: 640000\n",
+        encoding="utf-8",
+    )
+    harness = make_harness(
+        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+    )
+    assert harness.runtime._model_menu == []  # fresh daemon: menu not loaded
+    await harness.runtime.handle_dm(harness.ctx, "/model 2")
+    entry = harness.sessions.get("atlas")
+    assert (entry.model, entry.provider) == ("glm-5.3-flash", "aspark")
+    reply = harness.bot.sent[-1][1]
+    assert "Model set to aspark/glm-5.3-flash. Context: 640,000 tokens." in (
+        reply
+    )
+    # The gateway API inventory was never needed.
+    assert harness.hermes.models_calls == 0
+
+
+async def test_model_switch_reply_includes_context(test_hex, tmp_path):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "providers:\n"
+        "  openrouter:\n"
+        "    models:\n"
+        "      claude:\n"
+        "        context_length: 200000\n",
+        encoding="utf-8",
+    )
+    harness = make_harness(
+        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+    )
+    await harness.runtime.handle_dm(harness.ctx, "/model openrouter/claude")
+    assert (
+        "Model set to openrouter/claude. Context: 200,000 tokens."
+        in harness.bot.sent[-1][1]
+    )
+
+
 async def test_model_set_command_persists(test_hex):
     harness = make_harness(allow_hex=test_hex)
     await harness.runtime.handle_dm(harness.ctx, "/model openrouter/claude")
@@ -355,10 +407,32 @@ async def test_new_command_surfaces_hermes_error_detail(test_hex):
     assert "already in use" in reply
 
 
-async def test_new_command_without_preferences_says_gateway_default(test_hex):
+async def test_new_command_resolves_gateway_default_model(test_hex, tmp_path):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "model:\n"
+        "  provider: custom:aspark\n"
+        "  default: glm-5.3-flash\n"
+        "  context_length: 640000\n",
+        encoding="utf-8",
+    )
+    harness = make_harness(
+        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+    )
+    await harness.runtime.handle_dm(harness.ctx, "/new")
+    entry = harness.sessions.get("atlas")
+    assert (entry.model, entry.provider) == ("glm-5.3-flash", "aspark")
+    reply = harness.bot.sent[-1][1]
+    assert "Model: aspark/glm-5.3-flash." in reply
+    assert "Context: 640,000 tokens" in reply
+
+
+async def test_new_command_gateway_default_without_gateway_config(test_hex):
     harness = make_harness(allow_hex=test_hex)
     await harness.runtime.handle_dm(harness.ctx, "/new")
-    assert "Model: gateway default." in harness.bot.sent[-1][1]
+    reply = harness.bot.sent[-1][1]
+    assert "Model: gateway default." in reply
+    assert "Context: unknown for this model" in reply
 
 
 async def test_status_command(test_hex, clock):
@@ -413,6 +487,24 @@ async def test_status_context_without_configured_total(test_hex):
     assert "Context: 45,230 tokens (total unknown)" in (
         harness.bot.sent[-1][1]
     )
+
+
+async def test_status_resolves_gateway_default_model(test_hex, tmp_path):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "model:\n"
+        "  provider: custom:aspark\n"
+        "  default: glm-5.3-flash\n"
+        "  context_length: 640000\n",
+        encoding="utf-8",
+    )
+    harness = make_harness(
+        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+    )
+    await harness.runtime.handle_dm(harness.ctx, "/status")
+    reply = harness.bot.sent[-1][1]
+    assert "Model: aspark/glm-5.3-flash" in reply
+    assert "Context: no turns yet" in reply
 
 
 async def test_status_reports_busy_during_a_turn(test_hex):
