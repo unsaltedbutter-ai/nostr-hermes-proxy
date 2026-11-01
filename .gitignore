@@ -13,6 +13,7 @@ build/
 .env.*
 *.key
 secrets/
+private-keys.txt
 
 # Local config with secrets interpolated from env is fine; local-only overrides are not
 config.local.toml

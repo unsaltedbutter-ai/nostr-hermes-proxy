@@ -71,6 +71,7 @@ session mapping keeping each conversation separate.
 | **Session map** | personality → Hermes session id, **persisted atomically** (tmp+replace, the hermes-nostr seen-IDs pattern). Create on first contact via `POST /api/sessions`. `/new` swaps it |
 | **Command layer** | `/new`, `/model`, `/status` parsed *before* forwarding. See §6 |
 | **Ack policy** | Instant `👀` DM on every accepted non-command DM (including steers), with a 20-minute absolute NIP-40 expiry (`ack_text`/`ack_ttl_seconds` knobs). Built proxy-side (rumor + gift wrap via the SDK primitives) so it doesn't inherit the 7-day default |
+| **Ordered multi-chunk delivery** | NIP-59 randomizes wrap timestamps up to 2 days back, which scrambles multi-chunk ordering in clients. Every delivery (acks, replies, cron outbound) assigns each chunk a random backdate within `outbound_spread_seconds` (default 3600), **sorted ascending across chunks** — chunk 1 is always the newest, so clients show chunks in reading order while each wrap still looks individually random to relays. Implemented via nostrbot-sdk v0.8.0 `make_gift_wrap_async(..., wrap_created_at=…)` |
 | **Tool verbosity** | From the turn's SSE stream: omit entirely, or one-line summary (tools used, duration, failures). Precedent: hermes-nostr's `format_tool_event` returns None — on Nostr every tool event would be its own gift wrap |
 | **Reply chunking** | ~4096 chars, code-fence-aware `(1/N)` splitting — port from gateway core's `truncate_message` (NOT in hermes-nostr or nostrbot-sdk) |
 | **Relay hygiene** | See §7 — the INCIDENTS.md remediations |
@@ -278,8 +279,10 @@ relays = ["wss://nos.lol", "wss://relay.damus.io"]
 
 ## 12. Out of scope (for now)
 
-- Anything Hermes *initiates* to Nostr (cron deliveries, proactive sends) —
-  conversational DMs only, per OPTIONS.md's trade-off note. A tiny outbound
-  endpoint can be added later if needed.
+- ~~Anything Hermes *initiates* to Nostr~~ — **implemented 2026-11-01**: a
+  loopback control plane (`POST /v1/dm` + `nostr-send` CLI + persisted
+  idempotency + outbox worker) lets Hermes cron jobs push messages to the
+  owner — see `docs/HERMES-CRON-SETUP.md`. Cron jobs are the only outbound
+  caller; proactive agent-initiated sends remain out of scope.
 - Group chats, media, reactions/read receipts (no NIP-17 equivalents without
   metadata leaks).
