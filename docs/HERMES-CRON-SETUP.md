@@ -44,12 +44,13 @@ nostr-send [options] "<text>"        # or --file PATH for long output
   I/O; delivery failures retry in the daemon (5 attempts, exponential
   backoff) and are logged.
 
-**Status: pipeline verified 2026-11-01.** A live send from the Hermes
-side was accepted by the daemon and delivered to the owner's Nostur (see
-`docs/INCIDENTS.md` for operational history). What remains is migrating the
-four jobs below.
+**Status: complete 2026-11-01.** All four jobs migrated (Task 1) and
+dry-run verified (Task 2): three `[SILENT]` passes plus one real DM
+(weigh-in reminder) accepted and published by the daemon, and a manual CLI
+test confirmed received on the owner's Nostur. The reference below is kept
+for operational context.
 
-## Task 1 — migrate the four cron jobs
+## Task 1 — migrate the four cron jobs (done)
 
 For each of these jobs:
 
@@ -80,7 +81,7 @@ pattern (`job-store-reconcile-$(date +%F)`).
 The daily key makes gateway/daemon restarts safe: a retried cron run on the
 same day is a no-op if the first send already succeeded.
 
-## Task 2 — verify
+## Task 2 (done) — verify
 
 1. Trigger one dry-run of each migrated job (or run its prompt once).
 2. Confirm in the cron run store: exit 0 and the delivery line.
