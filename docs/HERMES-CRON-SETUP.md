@@ -44,6 +44,11 @@ nostr-send [options] "<text>"        # or --file PATH for long output
   I/O; delivery failures retry in the daemon (5 attempts, exponential
   backoff) and are logged.
 
+**Status: pipeline verified 2026-11-01.** A live send from the Hermes
+side was accepted by the daemon and delivered to the owner's Nostur (see
+`docs/INCIDENTS.md` for operational history). What remains is migrating the
+four jobs below.
+
 ## Task 1 — migrate the four cron jobs
 
 For each of these jobs:
