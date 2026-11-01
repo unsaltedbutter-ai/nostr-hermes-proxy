@@ -209,6 +209,7 @@ class FakeHermes:
         models: list[ModelOption] | None = None,
         providers: list[Any] | None = None,
         models_error: BaseException | None = None,
+        create_error: BaseException | None = None,
         steer_result: bool = True,
         activity: list[str] | None = None,
     ) -> None:
@@ -217,6 +218,7 @@ class FakeHermes:
         self.models = list(models or [])
         self.models_calls = 0
         self.models_error = models_error
+        self.create_error = create_error
         if providers is not None:
             self.models = provider_models(providers)
         self.activity = activity
@@ -266,6 +268,8 @@ class FakeHermes:
 
     async def create_session(self, name: str) -> str:
         self.create_calls.append(name)
+        if self.create_error is not None:
+            raise self.create_error
         self.session_id = f"{self.session_id}-new" if self.session_id else "sess-new"
         return self.session_id
 
@@ -350,6 +354,7 @@ def make_harness(
     models: list[ModelOption] | None = None,
     providers: list[Any] | None = None,
     models_error: BaseException | None = None,
+    create_error: BaseException | None = None,
     bot: Any | None = None,
     tmp_path=None,
     config_model: str | None = None,
@@ -380,6 +385,7 @@ def make_harness(
         models=models,
         providers=providers,
         models_error=models_error,
+        create_error=create_error,
         steer_result=steer_result,
         activity=activity,
     )

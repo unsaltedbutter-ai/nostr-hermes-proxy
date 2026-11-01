@@ -535,7 +535,10 @@ class PersonalityRuntime:
             return "Hermes lost this conversation; send /new to start over."
         if isinstance(exc, HermesConflictError):
             return "Hermes is busy with another turn; try again."
-        return ""
+        # Generic Hermes errors carry the gateway's own message — surface it
+        # (truncated) so failures like title collisions are actionable.
+        detail = str(exc).strip()
+        return detail[:200] if detail else ""
 
 
 __all__ = ["PersonalityRuntime"]

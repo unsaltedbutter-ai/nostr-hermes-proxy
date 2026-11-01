@@ -533,14 +533,40 @@ async def test_ensure_session_recreates_on_404(client_factory, sessions):
 
 
 async def test_create_session_title(client_factory):
-    seen: dict = {}
+    seen: list[str] = []
 
     def handler(request):
-        seen["body"] = json.loads(request.content)
+        body = json.loads(request.content)
+        seen.append(body["title"])
         return httpx.Response(200, json={"id": "sess-new"})
 
     assert await client_factory(handler).create_session("atlas") == "sess-new"
-    assert seen["body"] == {"title": "nostr:atlas"}
+    assert len(seen) == 1
+    # Titles are unique per creation: prefix + UTC timestamp.
+    assert seen[0].startswith("nostr:atlas ")
+
+
+async def test_create_session_retries_on_title_collision(client_factory):
+    bodies: list[str] = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body["title"])
+        if len(bodies) == 1:
+            return httpx.Response(400, json={
+                "error": {
+                    "message": "Title is already in use",
+                    "code": "invalid_title",
+                },
+            })
+        return httpx.Response(200, json={"id": "sess-retry"})
+
+    client = client_factory(handler)
+    assert await client.create_session("atlas") == "sess-retry"
+    assert len(bodies) == 2
+    assert bodies[0].startswith("nostr:atlas ")
+    # The retry is the same title plus a random disambiguating suffix.
+    assert bodies[1].startswith(bodies[0] + " [")
 
 
 async def test_list_models_normalizes(client_factory):

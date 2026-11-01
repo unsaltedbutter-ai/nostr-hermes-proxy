@@ -341,6 +341,20 @@ async def test_new_command_default_model_falls_back_to_gateway_context(
     assert "Context: 640,000 tokens" in harness.bot.sent[-1][1]
 
 
+async def test_new_command_surfaces_hermes_error_detail(test_hex):
+    harness = make_harness(
+        allow_hex=test_hex,
+        create_error=HermesError(
+            "create session failed (HTTP 400: Title 'nostr:Sam-I-Am' "
+            "is already in use)",
+        ),
+    )
+    await harness.runtime.handle_dm(harness.ctx, "/new")
+    reply = harness.bot.sent[-1][1]
+    assert "create session failed" in reply
+    assert "already in use" in reply
+
+
 async def test_new_command_without_preferences_says_gateway_default(test_hex):
     harness = make_harness(allow_hex=test_hex)
     await harness.runtime.handle_dm(harness.ctx, "/new")

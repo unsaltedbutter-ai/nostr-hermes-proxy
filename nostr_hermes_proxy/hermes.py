@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from urllib.parse import quote
 
@@ -206,10 +208,25 @@ class HermesClient:
         )
 
     async def create_session(self, personality: str) -> str:
-        """POST /api/sessions; returns the new session id."""
+        """POST /api/sessions; returns the new session id.
+
+        The gateway enforces unique session titles (400 ``invalid_title``
+        otherwise), so titles carry a UTC timestamp —
+        ``nostr:<name> YYYY-MM-DD HH:MM:SS`` — and a same-second collision
+        retries once with a random suffix. Old sessions are intentionally
+        kept: they remain visible in the gateway dashboard under their
+        titles.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        base_title = f"nostr:{personality} {stamp}"
         response = await self._client.post(
-            "/api/sessions", json={"title": f"nostr:{personality}"},
+            "/api/sessions", json={"title": base_title},
         )
+        if response.status_code == 400 and "invalid_title" in response.text:
+            response = await self._client.post(
+                "/api/sessions",
+                json={"title": f"{base_title} [{uuid.uuid4().hex[:8]}]"},
+            )
         await self._raise_for_status(response, "create session")
         data = self._json_body(response)
         session_id = self._extract_session_id(data)
