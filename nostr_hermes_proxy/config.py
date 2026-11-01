@@ -21,6 +21,10 @@ DEFAULT_HERMES_CONFIG_PATH = "~/.hermes/config.yaml"
 DEFAULT_WATCHDOG_INTERVAL_SECONDS = 60.0
 DEFAULT_WATCHDOG_FAILURE_THRESHOLD = 3
 DEFAULT_WATCHDOG_STALL_SECONDS = 2 * 60 * 60
+DEFAULT_CONTROL_PORT = 8787
+DEFAULT_CONTROL_TOKEN_PATH = "~/.config/nostr-hermes-proxy/control-token"
+DEFAULT_OUTBOUND_RATE_LIMIT_PER_MINUTE = 10
+DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS = 7 * 24 * 60 * 60
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -149,6 +153,10 @@ class Config:
     watchdog_interval_seconds: float = DEFAULT_WATCHDOG_INTERVAL_SECONDS
     watchdog_failure_threshold: int = DEFAULT_WATCHDOG_FAILURE_THRESHOLD
     watchdog_stall_seconds: float = DEFAULT_WATCHDOG_STALL_SECONDS
+    control_port: int = DEFAULT_CONTROL_PORT
+    control_token_path: str = DEFAULT_CONTROL_TOKEN_PATH
+    outbound_rate_limit_per_minute: int = DEFAULT_OUTBOUND_RATE_LIMIT_PER_MINUTE
+    outbound_expiry_max_seconds: int = DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS
     source: Path | None = None
 
     def personality(self, name: str) -> PersonalityConfig | None:
@@ -367,6 +375,54 @@ def parse_config(
     if watchdog_stall <= 0:
         raise ConfigError(f"{source}: watchdog_stall_seconds must be > 0")
 
+    control_port_raw = data.get("control_port", DEFAULT_CONTROL_PORT)
+    try:
+        control_port = int(control_port_raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{source}: control_port must be an integer") from exc
+    if isinstance(control_port_raw, bool) or not 0 <= control_port <= 65535:
+        raise ConfigError(
+            f"{source}: control_port must be between 0 and 65535 "
+            "(0 disables the control plane)"
+        )
+
+    control_token_path = data.get(
+        "control_token_path", DEFAULT_CONTROL_TOKEN_PATH,
+    )
+    if not isinstance(control_token_path, str) or not control_token_path.strip():
+        raise ConfigError(f"{source}: control_token_path must be a path string")
+    control_token_path = control_token_path.strip()
+
+    rate_raw = data.get(
+        "outbound_rate_limit_per_minute",
+        DEFAULT_OUTBOUND_RATE_LIMIT_PER_MINUTE,
+    )
+    try:
+        rate_limit = int(rate_raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{source}: outbound_rate_limit_per_minute must be an integer"
+        ) from exc
+    if isinstance(rate_raw, bool) or rate_limit <= 0:
+        raise ConfigError(
+            f"{source}: outbound_rate_limit_per_minute must be > 0"
+        )
+
+    expiry_max_raw = data.get(
+        "outbound_expiry_max_seconds",
+        DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS,
+    )
+    try:
+        expiry_max = int(expiry_max_raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{source}: outbound_expiry_max_seconds must be an integer"
+        ) from exc
+    if isinstance(expiry_max_raw, bool) or expiry_max <= 0:
+        raise ConfigError(
+            f"{source}: outbound_expiry_max_seconds must be > 0"
+        )
+
     return Config(
         hermes_url=hermes_url.rstrip("/"),
         allow_npub=allow_npub,
@@ -379,6 +435,10 @@ def parse_config(
         watchdog_interval_seconds=watchdog_interval,
         watchdog_failure_threshold=watchdog_threshold,
         watchdog_stall_seconds=watchdog_stall,
+        control_port=control_port,
+        control_token_path=control_token_path,
+        outbound_rate_limit_per_minute=rate_limit,
+        outbound_expiry_max_seconds=expiry_max,
         source=Path(source) if source != "<config>" else None,
     )
 
@@ -402,6 +462,10 @@ __all__ = [
     "ConfigError",
     "DEFAULT_ACK_TEXT",
     "DEFAULT_ACK_TTL_SECONDS",
+    "DEFAULT_CONTROL_PORT",
+    "DEFAULT_CONTROL_TOKEN_PATH",
+    "DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS",
+    "DEFAULT_OUTBOUND_RATE_LIMIT_PER_MINUTE",
     "DEFAULT_STATE_DIR",
     "PersonalityConfig",
     "load_config",

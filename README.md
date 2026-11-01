@@ -201,6 +201,53 @@ that turn and still gets its own ack; an exact duplicate delivery is dropped
 (the first delivery was already acked). Long replies are split at roughly 4096
 characters with fence-aware `(1/N)` markers.
 
+## Outbound control plane (for cron jobs)
+
+The daemon also owns the **outbound** half: a loopback-only HTTP endpoint that
+queues a DM for a personality and sends it as a NIP-17 gift wrap to that
+personality's allowlisted npub. Callers cannot pick a recipient.
+
+- Binds `127.0.0.1:<control_port>` (default `8787`; `control_port = 0`
+  disables it).
+- `Authorization: Bearer <token>` from `~/.config/nostr-hermes-proxy/control-token`
+  (0600). The file is generated automatically on first start; the daemon logs
+  its path, never the token.
+- Accepted sends are queued and returned immediately (`202`); relay delivery
+  happens in the background with retries. An unhealthy Nostr connection still
+  queues the message and returns `503` with `"queued_for_retry": true`.
+- Per-personality cap `outbound_rate_limit_per_minute` (default 10) → `429`.
+- `idempotency_key` is remembered for 24 h: a retry returns the original
+  response with `"duplicate": true` and does not send twice.
+- Expiry is clamped into `[60, outbound_expiry_max_seconds]` (default 7 days).
+
+### `nostr-send`
+
+`pip install -e .` installs the `nostr-send` script:
+
+```sh
+nostr-send "Morning finance digest"
+nostr-send --file /tmp/digest.txt --idempotency-key finance-$(date +%F)
+nostr-send --personality hermes --expiry 3600 "short-lived nudge"
+```
+
+It prints the JSON response and exits `0` on 2xx, `1` on an HTTP error status,
+and `2` when the daemon is unreachable or the token file is missing.
+
+### curl one-liner
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/dm \
+  -H "Authorization: Bearer $(cat ~/.config/nostr-hermes-proxy/control-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Morning summary","idempotency_key":"summary-2026-11-01"}'
+```
+
+`GET /v1/health` returns per-personality relay state:
+
+```json
+[{"name":"atlas","healthy":true,"relay_count":2,"watchdog":"ok"}]
+```
+
 ## Development
 
 ```sh

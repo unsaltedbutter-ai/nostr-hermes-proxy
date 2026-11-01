@@ -31,7 +31,12 @@ from .commands import (
     status_text,
     unknown_text,
 )
-from .config import DEFAULT_ACK_TEXT, DEFAULT_ACK_TTL_SECONDS, PersonalityConfig
+from .config import (
+    DEFAULT_ACK_TEXT,
+    DEFAULT_ACK_TTL_SECONDS,
+    DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS,
+    PersonalityConfig,
+)
 from .gateway_config import GatewayConfigError, GatewayModels, read_gateway_models
 from .hermes import (
     STATUS_COMPLETED,
@@ -46,6 +51,12 @@ from .sessions import SessionMap
 
 logger = logging.getLogger(__name__)
 
+MIN_OUTBOUND_EXPIRY_SECONDS = 60
+
+
+class DeliveryError(RuntimeError):
+    """The bot reported a failed publish; the caller should retry."""
+
 
 class PersonalityRuntime:
     def __init__(
@@ -59,6 +70,7 @@ class PersonalityRuntime:
         ack_ttl_seconds: int = DEFAULT_ACK_TTL_SECONDS,
         gateway_config_path: str | None = None,
         watchdog_stall_seconds: float | None = None,
+        outbound_expiry_max_seconds: int = DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS,
         bot: Any | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -76,6 +88,8 @@ class PersonalityRuntime:
         #: Last successful /model listing, for "/model #" resolution.
         self._model_menu: list[tuple[str | None, str]] = []
         self._watchdog_stall_seconds = watchdog_stall_seconds
+        #: Outbound NIP-40 expiries are clamped into [60, this].
+        self._outbound_expiry_max_seconds = int(outbound_expiry_max_seconds)
         self._clock = clock or time.time
         self._turn_lock = asyncio.Lock()
         #: Run id of the turn currently executing, or None when idle. Read
@@ -115,6 +129,10 @@ class PersonalityRuntime:
 
     def set_watchdog_status_provider(self, provider: Callable[[], str]) -> None:
         self._watchdog_status = provider
+
+    @property
+    def watchdog_state(self) -> str:
+        return self._watchdog_status()
 
     def seed_preferences(self) -> None:
         self.sessions.seed_preferences(
@@ -483,28 +501,49 @@ class PersonalityRuntime:
                 self.name, text, str(event_id),
             )
 
-    # -- immediate ack ---------------------------------------------------------
+    # -- outbound delivery -----------------------------------------------------
 
-    async def _send_ack(self, ctx: Any) -> None:
-        """Best-effort 👀 DM; never lets an ack failure break the turn."""
-        try:
-            await self._send_ack_event(ctx)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning(
-                "Could not send the ack DM for %s", self.name, exc_info=True,
-            )
+    async def deliver_dm(
+        self,
+        recipient_hex: str,
+        text: str,
+        expiry_seconds: int | None = None,
+        protocol: str = "nip17",
+    ) -> int:
+        """Send ``text`` to ``recipient_hex``, chunked; returns chunk count.
 
-    async def _send_ack_event(self, ctx: Any) -> None:
-        """Build and publish the ack with a short NIP-40 expiry.
-
-        Mirrors ``NostrBot.send_dm``'s NIP-17 path (rumor + gift wrap, both
-        carrying the same expiration tag, delivered to the sender's kind-10050
-        inbox relays) but with ``ack_ttl_seconds`` instead of the bot's
-        seven-day ``dm_expiry_seconds``. A NIP-04 sender gets a plain kind-4
-        event with the same expiry.
+        With an explicit expiry the NIP-17 gift wrap is built manually so the
+        rumor *and* the wrap carry the same NIP-40 tag and the wrap targets
+        the recipient's kind-10050 inbox relays (broadcast when none are
+        known). Without one the SDK's ``send_dm`` applies its seven-day
+        default. A NIP-04 correspondent gets kind-4 events, as before.
         """
+        chunks = truncate_message(text)
+        ttl = (
+            None
+            if expiry_seconds is None
+            else self._clamp_expiry(expiry_seconds)
+        )
+        for chunk in chunks:
+            await self._deliver_chunk(recipient_hex, chunk, ttl, protocol)
+        return len(chunks)
+
+    def _clamp_expiry(self, expiry_seconds: int) -> int:
+        maximum = max(MIN_OUTBOUND_EXPIRY_SECONDS,
+                      self._outbound_expiry_max_seconds)
+        try:
+            value = int(expiry_seconds)
+        except (TypeError, ValueError):
+            value = MIN_OUTBOUND_EXPIRY_SECONDS
+        return max(MIN_OUTBOUND_EXPIRY_SECONDS, min(value, maximum))
+
+    async def _deliver_chunk(
+        self,
+        recipient_hex: str,
+        text: str,
+        ttl: int | None,
+        protocol: str,
+    ) -> None:
         from nostr_sdk import (
             EventBuilder,
             Kind,
@@ -517,26 +556,34 @@ class PersonalityRuntime:
         )
         from nostrbot_sdk import expiration_tag
 
-        sender_hex = getattr(ctx, "sender_hex", "") or ""
-        pk = PublicKey.parse(sender_hex)
-        ttl = self.ack_ttl_seconds
-        protocol = getattr(ctx, "protocol", "nip17") or "nip17"
+        pk = PublicKey.parse(recipient_hex)
 
         if protocol == "nip04":
-            ciphertext = self.bot.signer.nip04_encrypt(pk, self.ack_text)
+            ciphertext = self.bot.signer.nip04_encrypt(pk, text)
+            tags: list[Any] = [Tag.public_key(pk)]
+            if ttl is not None:
+                tags.append(expiration_tag(ttl))
             event = await (
                 EventBuilder(Kind(4), ciphertext)
-                .tags([Tag.public_key(pk), expiration_tag(ttl)])
+                .tags(tags)
                 .finalize_async(self.bot.signer)
             )
             await self.bot.client.send_event(event)
+            return
+
+        if ttl is None:
+            ok = await self.bot.send_dm(recipient_hex, text)
+            if ok is False:
+                raise DeliveryError(
+                    f"send_dm reported failure for {self.name}"
+                )
             return
 
         exp = expiration_tag(ttl)
         rumor = (
             EventBuilder(
                 Kind.from_std(KindStandard.PRIVATE_DIRECT_MESSAGE),
-                self.ack_text,
+                text,
             )
             .tags([Tag.public_key(pk), exp])
             .finalize_unsigned(self.bot.keys.public_key())
@@ -544,7 +591,7 @@ class PersonalityRuntime:
         wrap = await nip59_make_gift_wrap_async(
             self.bot.signer, pk, rumor, expiration=None, extra_tags=[exp],
         )
-        relays = await self.bot.nip17_support.check(sender_hex)
+        relays = await self.bot.nip17_support.check(recipient_hex)
         if relays:
             relay_urls = [RelayUrl.parse(relay) for relay in relays]
             added: list[Any] = []
@@ -560,6 +607,24 @@ class PersonalityRuntime:
         await self.bot.client.send_event(
             wrap, target=SendEventTarget.broadcast(),
         )
+
+    # -- immediate ack ---------------------------------------------------------
+
+    async def _send_ack(self, ctx: Any) -> None:
+        """Best-effort 👀 DM; never lets an ack failure break the turn."""
+        try:
+            await self.deliver_dm(
+                getattr(ctx, "sender_hex", "") or "",
+                self.ack_text,
+                self.ack_ttl_seconds,
+                getattr(ctx, "protocol", "nip17") or "nip17",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Could not send the ack DM for %s", self.name, exc_info=True,
+            )
 
     async def _send_chunks(self, ctx: Any, text: str) -> None:
         for chunk in truncate_message(text):
@@ -588,4 +653,4 @@ class PersonalityRuntime:
         return detail[:200] if detail else ""
 
 
-__all__ = ["PersonalityRuntime"]
+__all__ = ["DeliveryError", "MIN_OUTBOUND_EXPIRY_SECONDS", "PersonalityRuntime"]

@@ -11,7 +11,9 @@ import sys
 from pathlib import Path
 
 from .config import Config, ConfigError, load_config
+from .control import ControlPlane, ControlTokenError, ensure_control_token
 from .hermes import HermesAuthError, HermesClient
+from .outbox import Outbox
 from .personality import PersonalityRuntime
 from .sessions import SessionMap
 from .watchdog import Watchdog
@@ -54,6 +56,7 @@ def _build_runtime(config: Config) -> tuple[list[PersonalityRuntime], HermesClie
             ack_ttl_seconds=config.ack_ttl_seconds,
             gateway_config_path=config.hermes_config_path,
             watchdog_stall_seconds=config.watchdog_stall_seconds,
+            outbound_expiry_max_seconds=config.outbound_expiry_max_seconds,
         )
         for personality in config.personalities
     ]
@@ -63,6 +66,23 @@ def _build_runtime(config: Config) -> tuple[list[PersonalityRuntime], HermesClie
 async def run(config: Config) -> int:
     config.state_dir.mkdir(parents=True, exist_ok=True)
     runtimes, hermes = _build_runtime(config)
+    runtimes_by_name = {runtime.name: runtime for runtime in runtimes}
+    outbox = Outbox(
+        config.state_dir / "outbox.json",
+        rate_limit_per_minute=config.outbound_rate_limit_per_minute,
+    )
+
+    async def deliver(
+        personality: str,
+        text: str,
+        expiry_seconds: int | None,
+    ) -> None:
+        runtime = runtimes_by_name[personality]
+        await runtime.deliver_dm(
+            runtime.allow_hex, text, expiry_seconds, protocol="nip17",
+        )
+
+    control: ControlPlane | None = None
     watchdog = Watchdog(
         runtimes,
         interval_seconds=config.watchdog_interval_seconds,
@@ -101,10 +121,32 @@ async def run(config: Config) -> int:
                     runtime.name, type(result).__name__,
                 )
                 logger.debug("Start failure detail", exc_info=result)
+        if config.control_port:
+            token, created = ensure_control_token(config.control_token_path)
+            token_path = Path(config.control_token_path).expanduser()
+            if created:
+                logger.info(
+                    "Generated control token at %s (mode 0600)", token_path,
+                )
+            else:
+                logger.info("Using control token at %s", token_path)
+            control = ControlPlane(
+                config=config,
+                outbox=outbox,
+                runtimes=runtimes_by_name,
+                token=token,
+            )
+            await control.start()
+        else:
+            logger.info("Control plane disabled (control_port = 0)")
+        outbox.start_worker(deliver)
         watchdog.start()
         await shutdown.wait()
     finally:
         logger.info("Shutting down")
+        if control is not None:
+            await control.stop()
+        await outbox.stop_worker()
         await watchdog.stop()
         await asyncio.gather(
             *(runtime.stop() for runtime in runtimes),
@@ -132,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return asyncio.run(run(config))
+    except (ControlTokenError, OSError) as exc:
+        print(f"control plane error: {exc}", file=sys.stderr)
+        return 2
     except HermesAuthError as exc:
         print(f"startup error: {exc}", file=sys.stderr)
         return 2

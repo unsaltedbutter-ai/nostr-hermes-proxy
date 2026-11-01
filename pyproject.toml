@@ -12,8 +12,12 @@ requires-python = ">=3.12"
 dependencies = [
     "nostrbot-sdk @ git+https://github.com/unsaltedbutter-ai/nostrbot-sdk.git@v0.7.0",
     "httpx>=0.27",
+    "aiohttp>=3.9",
     "PyYAML>=6.0",
 ]
+
+[project.scripts]
+nostr-send = "nostr_hermes_proxy.send_cli:main"
 
 [project.optional-dependencies]
 dev = [

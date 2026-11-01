@@ -223,3 +223,58 @@ def test_invalid_numeric_knobs_rejected(test_npub):
             ),
             environ=NSEC_ENV,
         )
+
+
+# -- control plane -------------------------------------------------------------
+
+
+def test_control_plane_defaults(test_npub):
+    config = parse_config(config_text(test_npub), environ=NSEC_ENV)
+    assert config.control_port == 8787
+    assert config.control_token_path.endswith("control-token")
+    assert config.outbound_rate_limit_per_minute == 10
+    assert config.outbound_expiry_max_seconds == 7 * 24 * 60 * 60
+
+
+def test_control_plane_knobs(test_npub):
+    config = parse_config(
+        config_text(
+            test_npub,
+            extra=(
+                "control_port = 9999\n"
+                'control_token_path = "~/custom-token"\n'
+                "outbound_rate_limit_per_minute = 3\n"
+                "outbound_expiry_max_seconds = 120\n"
+            ),
+        ),
+        environ=NSEC_ENV,
+    )
+    assert config.control_port == 9999
+    assert config.control_token_path == "~/custom-token"
+    assert config.outbound_rate_limit_per_minute == 3
+    assert config.outbound_expiry_max_seconds == 120
+
+
+def test_control_port_zero_disables(test_npub):
+    config = parse_config(
+        config_text(test_npub, extra="control_port = 0\n"),
+        environ=NSEC_ENV,
+    )
+    assert config.control_port == 0
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        ("control_port = 70000\n", "control_port"),
+        ('control_port = "soon"\n', "control_port"),
+        ("outbound_rate_limit_per_minute = 0\n", "outbound_rate_limit"),
+        ('outbound_rate_limit_per_minute = "often"\n', "outbound_rate_limit"),
+        ("outbound_expiry_max_seconds = 0\n", "outbound_expiry_max"),
+        ('outbound_expiry_max_seconds = "long"\n', "outbound_expiry_max"),
+        ('control_token_path = "  "\n', "control_token_path"),
+    ],
+)
+def test_bad_control_knobs_rejected(test_npub, extra, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_config(config_text(test_npub, extra=extra), environ=NSEC_ENV)

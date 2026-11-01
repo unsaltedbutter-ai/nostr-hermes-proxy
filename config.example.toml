@@ -27,6 +27,16 @@ ack_ttl_seconds = 1200
 # Defaults to ~/.local/state/nostr-hermes-proxy/
 # state_dir = "~/.local/state/nostr-hermes-proxy"
 
+# Outbound control plane for cron jobs and nostr-send. It binds 127.0.0.1
+# only; set control_port = 0 to disable it. The bearer token file is
+# generated (mode 0600) on first start when missing.
+control_port = 8787
+# control_token_path = "~/.config/nostr-hermes-proxy/control-token"
+# Politeness cap per personality, shared by cron jobs and the CLI.
+# outbound_rate_limit_per_minute = 10
+# Maximum (and default) outbound NIP-40 expiry; requests clamp into [60, this].
+# outbound_expiry_max_seconds = 604800
+
 # Optional defaults shared by every personality. The first relay should be
 # nos.lol; relay hygiene orders it first automatically.
 # relays = ["wss://nos.lol", "wss://relay.damus.io"]
