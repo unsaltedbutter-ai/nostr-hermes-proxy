@@ -197,6 +197,8 @@ class ControlPlane:
         if requested is None:
             if len(self.runtimes) == 1:
                 personality = next(iter(self.runtimes))
+            elif self.config.default_personality in self.runtimes:
+                personality = self.config.default_personality
             else:
                 return _error(
                     "personality is required when several are configured", 400,

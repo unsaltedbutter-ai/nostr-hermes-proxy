@@ -283,6 +283,9 @@ relays = ["wss://nos.lol", "wss://relay.damus.io"]
   loopback control plane (`POST /v1/dm` + `nostr-send` CLI + persisted
   idempotency + outbox worker) lets Hermes cron jobs push messages to the
   owner — see `docs/HERMES-CRON-SETUP.md`. Cron jobs are the only outbound
-  caller; proactive agent-initiated sends remain out of scope.
+  caller; proactive agent-initiated sends remain out of scope. The daemon's
+  `default_personality` knob (set to Sam-I-Am) resolves calls that omit
+  `--personality`; with several identities configured and no default, the
+  control plane still rejects the call with HTTP 400.
 - Group chats, media, reactions/read receipts (no NIP-17 equivalents without
   metadata leaks).

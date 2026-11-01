@@ -37,6 +37,81 @@ def _setup(tmp_path, allow_hex, *, rate=10, expiry_max=604800):
     return app, outbox, harness
 
 
+def _setup_multi(
+    tmp_path,
+    allow_hex,
+    *,
+    names=("atlas", "notible"),
+    default_personality=None,
+):
+    harnesses = [
+        make_harness(name=name, allow_hex=allow_hex, tmp_path=tmp_path)
+        for name in names
+    ]
+    config = Config(
+        hermes_url="http://127.0.0.1:8642",
+        allow_npub=allow_hex,
+        allow_hex=allow_hex,
+        ack_text="👀",
+        ack_ttl_seconds=1200,
+        personalities=tuple(h.config for h in harnesses),
+        state_dir=tmp_path,
+        outbound_rate_limit_per_minute=10,
+        outbound_expiry_max_seconds=604800,
+        default_personality=default_personality,
+    )
+    outbox = Outbox(None, rate_limit_per_minute=10)
+    app = create_app(
+        config=config,
+        outbox=outbox,
+        runtimes={h.config.name: h.runtime for h in harnesses},
+        token=TOKEN,
+    )
+    return app, outbox, harnesses
+
+
+async def test_post_dm_without_personality_uses_default(tmp_path, test_hex):
+    app, outbox, _ = _setup_multi(
+        tmp_path, test_hex, default_personality="notible",
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/dm", json={"text": "hi"}, headers=AUTH,
+        )
+    assert response.status == 202
+    assert len(outbox.queued("notible")) == 1
+    assert outbox.queued("atlas") == []
+
+
+async def test_post_dm_without_personality_without_default_rejected(
+    tmp_path, test_hex,
+):
+    app, outbox, _ = _setup_multi(tmp_path, test_hex)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/dm", json={"text": "hi"}, headers=AUTH,
+        )
+    assert response.status == 400
+    assert outbox.queued() == []
+
+
+async def test_post_dm_explicit_personality_overrides_default(
+    tmp_path, test_hex,
+):
+    app, outbox, _ = _setup_multi(
+        tmp_path, test_hex, default_personality="notible",
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/dm",
+            json={"text": "hi", "personality": "atlas"},
+            headers=AUTH,
+        )
+    assert response.status == 202
+    assert len(outbox.queued("atlas")) == 1
+    assert outbox.queued("notible") == []
+
+
 async def test_post_dm_accepts_and_queues(tmp_path, test_hex):
     app, outbox, _ = _setup(tmp_path, test_hex)
     async with TestClient(TestServer(app)) as client:

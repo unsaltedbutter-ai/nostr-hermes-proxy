@@ -31,7 +31,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--personality", default=None,
-        help="personality name (default: the only configured one)",
+        help="personality name (default: the daemon's configured "
+             "default_personality, or the only configured one)",
     )
     parser.add_argument(
         "--expiry", type=int, default=None,

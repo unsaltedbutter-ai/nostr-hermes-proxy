@@ -33,9 +33,15 @@ ack_ttl_seconds = 1200
 control_port = 8787
 # control_token_path = "~/.config/nostr-hermes-proxy/control-token"
 # Politeness cap per personality, shared by cron jobs and the CLI.
+
 # outbound_rate_limit_per_minute = 10
 # Maximum (and default) outbound NIP-40 expiry; requests clamp into [60, this].
 # outbound_expiry_max_seconds = 604800
+
+# Personality used when a control-plane caller omits --personality. Must name
+# a configured [[personality]]; with several identities and no default, calls
+# without one are rejected (HTTP 400).
+# default_personality = "Sam-I-Am"
 
 # Optional defaults shared by every personality. The first relay should be
 # nos.lol; relay hygiene orders it first automatically.

@@ -167,6 +167,10 @@ class Config:
     control_token_path: str = DEFAULT_CONTROL_TOKEN_PATH
     outbound_rate_limit_per_minute: int = DEFAULT_OUTBOUND_RATE_LIMIT_PER_MINUTE
     outbound_expiry_max_seconds: int = DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS
+    #: Personality used when a control-plane caller omits ``personality``.
+    #: With one personality configured this is unnecessary; with several it
+    #: replaces the hard 400. None keeps the strict behavior.
+    default_personality: str | None = None
     source: Path | None = None
 
     def personality(self, name: str) -> PersonalityConfig | None:
@@ -381,6 +385,22 @@ def parse_config(
             f"{source}: duplicate personality name(s): {', '.join(duplicates)}"
         )
 
+    default_personality = data.get("default_personality")
+    if default_personality is not None:
+        if (
+            not isinstance(default_personality, str)
+            or not default_personality.strip()
+        ):
+            raise ConfigError(
+                f"{source}: default_personality must be a personality name"
+            )
+        default_personality = default_personality.strip()
+        if default_personality not in names:
+            raise ConfigError(
+                f"{source}: default_personality {default_personality!r} does "
+                "not match any configured personality"
+            )
+
     state_dir = Path(
         str(data.get("state_dir", DEFAULT_STATE_DIR))
     ).expanduser()
@@ -480,6 +500,7 @@ def parse_config(
         control_token_path=control_token_path,
         outbound_rate_limit_per_minute=rate_limit,
         outbound_expiry_max_seconds=expiry_max,
+        default_personality=default_personality,
         source=Path(source) if source != "<config>" else None,
     )
 

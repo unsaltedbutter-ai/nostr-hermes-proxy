@@ -377,3 +377,28 @@ def test_personality_profile_rejects_control_characters(test_npub):
     )
     with pytest.raises(ConfigError, match="single-line"):
         parse_config(text, environ=NSEC_ENV)
+
+
+def test_default_personality_parses(test_npub):
+    text = config_text(test_npub, extra='default_personality = "atlas"')
+    config = parse_config(text, environ=NSEC_ENV)
+    assert config.default_personality == "atlas"
+
+
+def test_default_personality_absent_is_none(test_npub):
+    config = parse_config(config_text(test_npub), environ=NSEC_ENV)
+    assert config.default_personality is None
+
+
+def test_default_personality_must_match_configured(test_npub):
+    text = config_text(test_npub, extra='default_personality = "ghost"')
+    with pytest.raises(
+        ConfigError, match="does not match any configured personality",
+    ):
+        parse_config(text, environ=NSEC_ENV)
+
+
+def test_default_personality_must_be_string(test_npub):
+    text = config_text(test_npub, extra="default_personality = 3")
+    with pytest.raises(ConfigError, match="must be a personality name"):
+        parse_config(text, environ=NSEC_ENV)

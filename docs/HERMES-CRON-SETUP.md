@@ -26,16 +26,15 @@ A control plane inside the `nostr-hermes-proxy` daemon (LaunchAgent
 ```bash
 nostr-send [options] "<text>"        # or --file PATH for long output
   --idempotency-key K   # dedupe: same key within 24h → no second send
-  --personality NAME    # required now that several identities are configured
+  --personality NAME    # optional; omitted → the daemon's default (Sam-I-Am)
   --expiry SECONDS      # optional; default 7 days
   --port / --token-path # override defaults if ever needed
 ```
 
-- Identities configured (2026-11-01): `Sam-I-Am`, `nostrmix-bot`,
-  `unsaltedbutter-bot`, `Notible`. Omitting `--personality` is rejected with
-  HTTP 400 while more than one is configured. The four finance jobs send as
-  `Sam-I-Am` (the identity already in the owner's DM thread) unless the
-  owner says otherwise.
+- Identities configured (2026-11-01): `Sam-I-Am` (the daemon's
+  `default_personality`), `nostrmix-bot`, `unsaltedbutter-bot`, `Notible`.
+  Omitting `--personality` sends as Sam-I-Am; name another identity
+  explicitly when the owner asks for it.
 
 - Exit codes: `0` sent (or duplicate) · `1` HTTP error (400/401/403/429/503
   body printed) · `2` daemon unreachable/timeout.
@@ -63,7 +62,6 @@ For each of these jobs:
 ```
 DELIVERY: Send your final output to the user by running:
   /Users/butter/nostr-hermes-proxy/venv/bin/nostr-send \
-    --personality "Sam-I-Am" \
     --idempotency-key <job-name>-$(date +%F) --file <(your output)
 If your result is [SILENT], do NOT run nostr-send — emit [SILENT] as usual.
 If nostr-send exits nonzero, state "NOSTR-SEND FAILED" as the first line of
