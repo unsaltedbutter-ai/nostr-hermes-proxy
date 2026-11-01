@@ -128,3 +128,74 @@ def test_payload_shape(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["version"] == 1
     assert data["sessions"]["atlas"]["hermes_session_id"] == "sess-1"
+
+
+def test_usage_persists_and_survives_reload(tmp_path):
+    path = tmp_path / "sessions.json"
+    sessions = SessionMap(path, clock=make_clock(100.0))
+    sessions.set("atlas", "sess-1", model="m", provider="p")
+    sessions.update_usage("atlas", 45230)
+
+    entry = sessions.get("atlas")
+    assert entry.last_input_tokens == 45230
+    assert entry.model == "m" and entry.provider == "p"
+
+    reloaded = SessionMap(path).get("atlas")
+    assert reloaded.last_input_tokens == 45230
+
+
+def test_update_model_keeps_usage(tmp_path):
+    sessions = SessionMap(tmp_path / "sessions.json")
+    sessions.set("atlas", "sess-1", model="m1", provider="p1")
+    sessions.update_usage("atlas", 1234)
+    sessions.update_model("atlas", "m2", "p2")
+    entry = sessions.get("atlas")
+    assert (entry.model, entry.provider) == ("m2", "p2")
+    assert entry.last_input_tokens == 1234
+
+
+def test_new_session_resets_usage(tmp_path):
+    sessions = SessionMap(tmp_path / "sessions.json")
+    sessions.set("atlas", "sess-1")
+    sessions.update_usage("atlas", 1234)
+    sessions.reset("atlas")
+    sessions.set("atlas", "sess-2")
+    assert sessions.get("atlas").last_input_tokens is None
+
+
+def test_old_state_without_usage_loads(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "sessions": {
+                "atlas": {
+                    "hermes_session_id": "sess-1",
+                    "model": "m",
+                    "provider": "p",
+                    "created_at": 10.0,
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    entry = SessionMap(path).get("atlas")
+    assert entry.last_input_tokens is None
+    assert entry.model == "m"
+
+
+def test_malformed_usage_is_ignored(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "sessions": {
+                "atlas": {
+                    "hermes_session_id": "sess-1",
+                    "last_input_tokens": "lots",
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    assert SessionMap(path).get("atlas").last_input_tokens is None

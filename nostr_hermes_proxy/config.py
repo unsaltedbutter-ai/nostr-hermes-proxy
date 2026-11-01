@@ -10,12 +10,13 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 DEFAULT_STATE_DIR = "~/.local/state/nostr-hermes-proxy"
-DEFAULT_ACK_DELAY_SECONDS = 3.0
+DEFAULT_ACK_TEXT = "👀"
+DEFAULT_ACK_TTL_SECONDS = 1200
 DEFAULT_WATCHDOG_INTERVAL_SECONDS = 60.0
 DEFAULT_WATCHDOG_FAILURE_THRESHOLD = 3
 DEFAULT_WATCHDOG_STALL_SECONDS = 2 * 60 * 60
@@ -139,9 +140,11 @@ class Config:
     hermes_url: str
     allow_npub: str
     allow_hex: str
-    ack_delay_seconds: float
+    ack_text: str
+    ack_ttl_seconds: int
     personalities: tuple[PersonalityConfig, ...]
     state_dir: Path
+    context_lengths: Mapping[str, int] = field(default_factory=dict)
     watchdog_interval_seconds: float = DEFAULT_WATCHDOG_INTERVAL_SECONDS
     watchdog_failure_threshold: int = DEFAULT_WATCHDOG_FAILURE_THRESHOLD
     watchdog_stall_seconds: float = DEFAULT_WATCHDOG_STALL_SECONDS
@@ -254,6 +257,26 @@ def _parse_personality(
     )
 
 
+def _parse_context_lengths(raw: Any, *, source: str) -> dict[str, int]:
+    """Parse ``[context_lengths]`` (bare model id -> total token count)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{source}: context_lengths must be a TOML table")
+    lengths: dict[str, int] = {}
+    for model, value in raw.items():
+        if not isinstance(model, str) or not model.strip():
+            raise ConfigError(
+                f"{source}: context_lengths keys must be model ids"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigError(
+                f"{source}: context_lengths[{model!r}] must be an integer > 0"
+            )
+        lengths[model.strip()] = value
+    return lengths
+
+
 def parse_config(
     text: str,
     *,
@@ -286,12 +309,19 @@ def parse_config(
     allow_hex = npub_to_hex(allow_raw)
     allow_npub = allow_raw.lower() if allow_raw.lower().startswith("npub1") else allow_hex
 
+    ack_text = data.get("ack_text", DEFAULT_ACK_TEXT)
+    if not isinstance(ack_text, str) or not ack_text.strip():
+        raise ConfigError(f"{source}: ack_text must be a non-empty string")
+    ack_ttl_raw = data.get("ack_ttl_seconds", DEFAULT_ACK_TTL_SECONDS)
     try:
-        ack_delay = float(data.get("ack_delay_seconds", DEFAULT_ACK_DELAY_SECONDS))
+        ack_ttl = int(ack_ttl_raw)
     except (TypeError, ValueError) as exc:
-        raise ConfigError(f"{source}: ack_delay_seconds must be a number") from exc
-    if ack_delay < 0:
-        raise ConfigError(f"{source}: ack_delay_seconds must be >= 0")
+        raise ConfigError(f"{source}: ack_ttl_seconds must be an integer") from exc
+    if isinstance(ack_ttl_raw, bool) or ack_ttl < 60:
+        raise ConfigError(f"{source}: ack_ttl_seconds must be >= 60")
+    context_lengths = _parse_context_lengths(
+        data.get("context_lengths"), source=source,
+    )
 
     raw_personalities = data.get("personality", data.get("personalities", []))
     if not isinstance(raw_personalities, list) or not raw_personalities:
@@ -351,9 +381,11 @@ def parse_config(
         hermes_url=hermes_url.rstrip("/"),
         allow_npub=allow_npub,
         allow_hex=allow_hex,
-        ack_delay_seconds=ack_delay,
+        ack_text=ack_text,
+        ack_ttl_seconds=ack_ttl,
         personalities=personalities,
         state_dir=state_dir,
+        context_lengths=context_lengths,
         watchdog_interval_seconds=watchdog_interval,
         watchdog_failure_threshold=watchdog_threshold,
         watchdog_stall_seconds=watchdog_stall,
@@ -378,6 +410,8 @@ def load_config(
 __all__ = [
     "Config",
     "ConfigError",
+    "DEFAULT_ACK_TEXT",
+    "DEFAULT_ACK_TTL_SECONDS",
     "DEFAULT_STATE_DIR",
     "PersonalityConfig",
     "load_config",

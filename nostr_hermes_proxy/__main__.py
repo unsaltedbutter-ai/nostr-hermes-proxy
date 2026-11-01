@@ -10,7 +10,6 @@ import signal
 import sys
 from pathlib import Path
 
-from .ack import AckPolicy
 from .config import Config, ConfigError, load_config
 from .hermes import HermesAuthError, HermesClient
 from .personality import PersonalityRuntime
@@ -45,14 +44,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def _build_runtime(config: Config) -> tuple[list[PersonalityRuntime], HermesClient]:
     sessions = SessionMap(config.state_dir / "sessions.json")
     hermes = HermesClient(config.hermes_url, sessions)
-    ack_policy = AckPolicy(config.ack_delay_seconds)
     runtimes = [
         PersonalityRuntime(
             personality,
             allow_hex=config.allow_hex,
             hermes=hermes,
             sessions=sessions,
-            ack_policy=ack_policy,
+            ack_text=config.ack_text,
+            ack_ttl_seconds=config.ack_ttl_seconds,
+            context_lengths=config.context_lengths,
             watchdog_stall_seconds=config.watchdog_stall_seconds,
         )
         for personality in config.personalities

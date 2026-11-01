@@ -14,8 +14,15 @@ hermes_url = "http://127.0.0.1:8642"
 # everyone else is dropped and logged. Accepts npub1... or 64-char hex.
 allow_npub = "npub1REPLACE_WITH_OWNER_NPUB"
 
-# 0 = ack immediately on accept. N > 0 = ack only if no reply within N seconds.
-ack_delay_seconds = 3
+# Immediate ack: every accepted non-command DM gets this text as its own DM,
+# carrying a short NIP-40 expiration (minimum TTL 60 seconds).
+ack_text = "👀"
+ack_ttl_seconds = 1200
+
+# Per-model context window, used by /new and /status. Keys are bare model ids
+# as they appear in /model; values are total tokens (integers > 0).
+# [context_lengths]
+# "glm-5.3-flash" = 131072
 
 # Defaults to ~/.local/state/nostr-hermes-proxy/
 # state_dir = "~/.local/state/nostr-hermes-proxy"

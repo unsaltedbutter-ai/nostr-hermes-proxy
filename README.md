@@ -19,12 +19,14 @@ exists.
 - Forward each DM to the local Hermes gateway over its authenticated HTTP API,
   keeping one persistent Hermes session per personality
 - **Steer** a follow-up DM into the turn already running instead of queueing it
-- Reply over NIP-17 gift wraps: **ack** on receipt, **tool-call noise omitted
-  or summarized**, long replies chunked
+- Reply over NIP-17 gift wraps with an **instant 👀 ack** (its own DM, 20-minute
+  NIP-40 expiry), **tool-call noise omitted or summarized**, long replies chunked
 - Drop replayed duplicate deliveries (the gateway's durable `Idempotency-Key`
   replay) without sending a second reply
-- Intercept special commands before Hermes: `/new` (fresh conversation),
-  `/model` (switch models), `/status`
+- Intercept special commands before Hermes: `/new` (fresh conversation,
+  echoes model + context size), `/model` (numbered menu of your user-defined
+  providers/models, switch by number or `provider/model`), `/status`
+  (conversation position, busy/idle, session, queue, relays, watchdog)
 
 ## Architecture
 
@@ -56,11 +58,14 @@ Each ordinary DM is submitted as a durable Hermes **run**:
    `tool.completed`/`tool.failed` feed the optional one-line tool summary, and
    `: keepalive` comment lines are skipped. If the stream ends before a
    terminal frame, one `GET /v1/runs/{run_id}` poll provides `{status, output}`.
-3. While that run is in flight, another DM from the owner is **steered** with
-   `POST /v1/runs/{run_id}/steer` rather than queued. A steered DM gets **no
-   ack** and no separate reply: the running turn's reply covers both messages.
-   If the steer is refused because the turn just finished, the proxy falls
-   back to submitting a new turn (serialized by the gateway's session lease).
+3. Every accepted non-command DM is acked immediately with a 👀 DM carrying a
+   20-minute NIP-40 expiry, sent **before** the turn lock is acquired (so a DM
+   that will be steered still gets exactly one ack). While a run is in flight,
+   another DM from the owner is **steered** with
+   `POST /v1/runs/{run_id}/steer` rather than queued; the running turn's reply
+   covers both messages. If the steer is refused because the turn just
+   finished, the proxy falls back to submitting a new turn (serialized by the
+   gateway's session lease).
 4. `run.failed` / `run.cancelled` / `run.interrupted` produce an error DM;
    successful replies are chunked at ~4096 characters with fence-aware
    `(1/N)` markers.
@@ -116,6 +121,18 @@ Edit `config.toml`:
   `${ENV_VAR}` placeholder; a literal `nsec1...` is rejected at startup.
 - Optional per-personality `relays`, `model`, `provider`, and a global `relays`
   fallback.
+- `ack_text` (default `"👀"`) and `ack_ttl_seconds` (default `1200`, minimum
+  60) for the immediate ack.
+- `[context_lengths]` maps bare model ids to total context tokens, used by
+  `/new` and `/status`:
+
+  ```toml
+  [context_lengths]
+  "glm-5.3-flash" = 131072
+  ```
+
+  Models without an entry show `Context: unknown (add it under
+  [context_lengths] in config.toml)`; `/status` still reports consumed tokens.
 
 Secrets come from the environment:
 
@@ -171,15 +188,17 @@ remove the placeholder values once the env file is in place.
 
 | Command | Behavior |
 |---|---|
-| `/new` | Start a fresh Hermes session (keeps the model preference) |
-| `/model` | List available models |
-| `/model provider/model` | Switch this personality's model |
-| `/status` | Personality, model, session age, queue, relays, watchdog state |
+| `/new` | Start a fresh Hermes session (keeps the model preference) and echo the model plus configured context size |
+| `/model` | Numbered menu of the gateway's **user-defined** `provider/model` entries, with `← current` |
+| `/model #` | Switch to entry `#` from the last menu |
+| `/model provider/model` | Switch this personality's model directly |
+| `/status` | Personality, model, context (consumed/total), busy/idle, session age, queue, relays, watchdog state |
 | `/help` | Command list |
 
-Anything else is forwarded to Hermes verbatim as a `/v1/runs` run. A DM sent
-while a turn is running steers that turn (no ack for the steered message); an
-exact duplicate delivery is dropped. Long replies are split at roughly 4096
+Anything else is forwarded to Hermes verbatim as a `/v1/runs` run, after an
+immediate 👀 ack (20-minute expiry). A DM sent while a turn is running steers
+that turn and still gets its own ack; an exact duplicate delivery is dropped
+(the first delivery was already acked). Long replies are split at roughly 4096
 characters with fence-aware `(1/N)` markers.
 
 ## Development

@@ -7,12 +7,21 @@ tested without a bot, a socket, or a gateway.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Sequence
 
 COMMANDS = ("new", "model", "status", "help")
 
-MAX_MODELS_SHOWN = 30
+MODEL_MENU_PROMPT = "Reply /model # to switch."
+MODEL_MENU_HINT = "Send /model first to list available models."
+NO_MODELS_TEXT = (
+    "No user-defined providers or models found on the gateway. "
+    "Check the gateway config."
+)
+UNKNOWN_CONTEXT_HINT = (
+    "Context: unknown (add it under [context_lengths] in config.toml)"
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,29 @@ def format_model_label(model: str | None, provider: str | None) -> str:
     return model
 
 
+def parse_model_index(args: str) -> int | None:
+    """Parse a menu number (``/model 3``). None means "not a number"."""
+    token = (args or "").strip()
+    if not re.fullmatch(r"[+-]?\d+", token):
+        return None
+    return int(token)
+
+
+def context_line(consumed: int | None, total: int | None) -> str:
+    """One ``/status`` context line; degrades when totals are unknown."""
+    if consumed is None:
+        return "Context: no turns yet"
+    if total is None:
+        return f"Context: {consumed:,} tokens (total unknown)"
+    if total <= 0:
+        return f"Context: {consumed:,} tokens (total unknown)"
+    percentage = consumed / total * 100
+    return (
+        f"Context: {consumed:,} / {total:,} tokens "
+        f"({percentage:.0f}%)"
+    )
+
+
 def format_session_age(seconds: float | None) -> str:
     if seconds is None or seconds < 0:
         return "not started"
@@ -90,15 +122,28 @@ def help_text() -> str:
     return (
         "Commands:\n"
         "/new - start a fresh Hermes session\n"
-        "/model - list models\n"
+        "/model - list user-defined models\n"
+        "/model # - switch to a model from that list\n"
         "/model provider/model - switch this personality's model\n"
-        "/status - show session, queue, relays, watchdog\n"
+        "/status - show model, context, state, queue, relays, watchdog\n"
         "/help - show this message"
     )
 
 
-def new_text() -> str:
-    return "New conversation started."
+def new_text(
+    model: str | None = None,
+    provider: str | None = None,
+    context_total: int | None = None,
+) -> str:
+    if context_total is None:
+        context = UNKNOWN_CONTEXT_HINT
+    else:
+        context = f"Context: {context_total:,} tokens"
+    return "\n".join([
+        "New conversation started.",
+        f"Model: {format_model_label(model, provider)}.",
+        context,
+    ])
 
 
 def unknown_text(name: str) -> str:
@@ -110,41 +155,33 @@ def model_set_text(model: str, provider: str | None) -> str:
     return f"Model set to {format_model_label(model, provider)}."
 
 
-def _model_parts(option: Any) -> tuple[str | None, str]:
-    if isinstance(option, dict):
-        provider = option.get("provider")
-        model = option.get("model") or option.get("id")
-    else:
-        provider = getattr(option, "provider", None)
-        model = getattr(option, "model", None)
-    if model is None and isinstance(option, str):
-        model = option
-    provider = str(provider).strip() if provider else None
-    model = str(model).strip() if model else ""
-    return provider, model
+def models_menu_text(
+    items: Sequence[tuple[str | None, str]],
+    *,
+    current_model: str | None = None,
+    current_provider: str | None = None,
+) -> str:
+    """Numbered ``/model`` menu: one ``provider/model`` line per entry."""
+    if not items:
+        return NO_MODELS_TEXT
+    lines = [f"Models ({len(items)}):"]
+    for index, (provider, model) in enumerate(items, start=1):
+        marker = ""
+        if model == current_model and (
+            current_provider is None or provider == current_provider
+        ):
+            marker = " ← current"
+        lines.append(
+            f"{index}. {format_model_label(model, provider)}{marker}"
+        )
+    lines.append(MODEL_MENU_PROMPT)
+    return "\n".join(lines)
 
 
-def models_text(options: Sequence[Any]) -> str:
-    lines: list[str] = []
-    shown = 0
-    total = 0
-    for option in options:
-        provider, model = _model_parts(option)
-        if not model:
-            continue
-        total += 1
-        if shown >= MAX_MODELS_SHOWN:
-            continue
-        lines.append(f"- {format_model_label(model, provider)}")
-        shown += 1
-    if total == 0:
-        return "No models available."
-    header = f"Models ({total}):"
-    footer = "Use /model provider/model to switch."
-    hidden = total - shown
-    if hidden > 0:
-        lines.append(f"- ... and {hidden} more")
-    return "\n".join([header, *lines, footer])
+def model_index_out_of_range_text(index: int) -> str:
+    return (
+        f"No model #{index} in the list. {MODEL_MENU_HINT}"
+    )
 
 
 def status_text(
@@ -156,11 +193,16 @@ def status_text(
     queue_depth: int,
     relay_count: int,
     watchdog_state: str,
+    consumed_tokens: int | None = None,
+    context_total: int | None = None,
+    busy: bool = False,
 ) -> str:
     return "\n".join([
         f"Personality: {name}",
         f"Model: {format_model_label(model, provider)}",
         f"Session: {format_session_age(session_age_seconds)}",
+        f"State: {'busy (turn in flight)' if busy else 'idle'}",
+        context_line(consumed_tokens, context_total),
         f"Queue: {queue_depth} waiting",
         f"Relays: {relay_count}",
         f"Watchdog: {watchdog_state}",
@@ -178,16 +220,22 @@ def error_text(message: str = "") -> str:
 __all__ = [
     "COMMANDS",
     "Command",
-    "MAX_MODELS_SHOWN",
+    "MODEL_MENU_HINT",
+    "MODEL_MENU_PROMPT",
     "ModelSelection",
+    "NO_MODELS_TEXT",
+    "UNKNOWN_CONTEXT_HINT",
+    "context_line",
     "error_text",
     "format_model_label",
     "format_session_age",
     "help_text",
+    "model_index_out_of_range_text",
     "model_set_text",
-    "models_text",
+    "models_menu_text",
     "new_text",
     "parse_command",
+    "parse_model_index",
     "parse_model_selection",
     "status_text",
     "unknown_text",

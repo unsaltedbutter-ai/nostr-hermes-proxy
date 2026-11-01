@@ -29,6 +29,8 @@ class SessionEntry:
     model: str | None = None
     provider: str | None = None
     created_at: float = 0.0
+    #: ``usage.input_tokens`` from the last completed turn, when reported.
+    last_input_tokens: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -36,6 +38,7 @@ class SessionEntry:
             "model": self.model,
             "provider": self.provider,
             "created_at": self.created_at,
+            "last_input_tokens": self.last_input_tokens,
         }
 
     @classmethod
@@ -55,11 +58,19 @@ class SessionEntry:
             created_at = float(raw.get("created_at") or 0.0)
         except (TypeError, ValueError):
             created_at = 0.0
+        last_input_tokens = raw.get("last_input_tokens")
+        if (
+            isinstance(last_input_tokens, bool)
+            or not isinstance(last_input_tokens, int)
+            or last_input_tokens < 0
+        ):
+            last_input_tokens = None
         return cls(
             hermes_session_id=session_id or None,
             model=model or None,
             provider=provider or None,
             created_at=created_at,
+            last_input_tokens=last_input_tokens,
         )
 
 
@@ -133,6 +144,9 @@ class SessionMap:
                     if existing is not None and existing.created_at
                     else self._clock()
                 ),
+                last_input_tokens=(
+                    existing.last_input_tokens if existing is not None else None
+                ),
             )
             self._sessions[name] = entry
             self._write_locked()
@@ -185,6 +199,32 @@ class SessionMap:
                     if existing is not None and existing.created_at
                     else self._clock()
                 ),
+                last_input_tokens=(
+                    existing.last_input_tokens if existing is not None else None
+                ),
+            )
+            self._sessions[name] = entry
+            self._write_locked()
+            return entry
+
+    def update_usage(
+        self, name: str, input_tokens: int | None,
+    ) -> SessionEntry:
+        """Record the last completed turn's input tokens."""
+        with self._lock:
+            existing = self._sessions.get(name)
+            entry = SessionEntry(
+                hermes_session_id=(
+                    existing.hermes_session_id if existing is not None else None
+                ),
+                model=existing.model if existing is not None else None,
+                provider=existing.provider if existing is not None else None,
+                created_at=(
+                    existing.created_at
+                    if existing is not None and existing.created_at
+                    else self._clock()
+                ),
+                last_input_tokens=input_tokens,
             )
             self._sessions[name] = entry
             self._write_locked()

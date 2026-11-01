@@ -12,23 +12,25 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
-from .ack import AckPolicy, PendingAck
 from .chunking import truncate_message
 from .commands import (
+    MODEL_MENU_HINT,
     Command,
     error_text,
     help_text,
+    model_index_out_of_range_text,
     model_set_text,
-    models_text,
+    models_menu_text,
     new_text,
     parse_command,
+    parse_model_index,
     parse_model_selection,
     status_text,
     unknown_text,
 )
-from .config import PersonalityConfig
+from .config import DEFAULT_ACK_TEXT, DEFAULT_ACK_TTL_SECONDS, PersonalityConfig
 from .hermes import (
     STATUS_COMPLETED,
     HermesAuthError,
@@ -51,7 +53,9 @@ class PersonalityRuntime:
         allow_hex: str,
         hermes: HermesClient,
         sessions: SessionMap,
-        ack_policy: AckPolicy,
+        ack_text: str = DEFAULT_ACK_TEXT,
+        ack_ttl_seconds: int = DEFAULT_ACK_TTL_SECONDS,
+        context_lengths: Mapping[str, int] | None = None,
         watchdog_stall_seconds: float | None = None,
         bot: Any | None = None,
         clock: Callable[[], float] = time.time,
@@ -61,7 +65,11 @@ class PersonalityRuntime:
         self.allow_hex = allow_hex.lower()
         self.hermes = hermes
         self.sessions = sessions
-        self.ack_policy = ack_policy
+        self.ack_text = ack_text
+        self.ack_ttl_seconds = int(ack_ttl_seconds)
+        self.context_lengths = dict(context_lengths or {})
+        #: Last successful /model listing, for "/model #" resolution.
+        self._model_menu: list[tuple[str | None, str]] = []
         self._watchdog_stall_seconds = watchdog_stall_seconds
         self._clock = clock or time.time
         self._turn_lock = asyncio.Lock()
@@ -138,6 +146,9 @@ class PersonalityRuntime:
             if command is not None:
                 await self._handle_command(ctx, command)
                 return
+            # Ack on acceptance, before the turn lock (and before steering),
+            # so every non-command DM gets exactly one 👀 immediately.
+            await self._send_ack(ctx)
             await self._handle_turn(ctx, text)
         except asyncio.CancelledError:
             raise
@@ -180,14 +191,15 @@ class PersonalityRuntime:
             logger.warning("Could not create session for %s: %s", self.name, exc)
             await self._send_chunks(ctx, error_text(self._error_detail(exc)))
             return
+        model = previous.model if previous else self.config.model
+        provider = previous.provider if previous else self.config.provider
         self.sessions.reset(self.name)
         self.sessions.set(
-            self.name,
-            session_id,
-            model=previous.model if previous else self.config.model,
-            provider=previous.provider if previous else self.config.provider,
+            self.name, session_id, model=model, provider=provider,
         )
-        await self._send_chunks(ctx, new_text())
+        await self._send_chunks(
+            ctx, new_text(model, provider, self._context_total(model)),
+        )
 
     async def _command_model(self, ctx: Any, args: str) -> None:
         if not args:
@@ -197,14 +209,49 @@ class PersonalityRuntime:
                 logger.warning("Could not list models for %s: %s", self.name, exc)
                 await self._send_chunks(ctx, error_text(self._error_detail(exc)))
                 return
-            await self._send_chunks(ctx, models_text(options))
+            menu = [
+                (option.provider, option.model)
+                for option in options
+                if getattr(option, "user_defined", False)
+            ]
+            self._model_menu = menu
+            entry = self.sessions.get(self.name)
+            await self._send_chunks(
+                ctx,
+                models_menu_text(
+                    menu,
+                    current_model=(
+                        entry.model if entry is not None else self.config.model
+                    ),
+                    current_provider=(
+                        entry.provider
+                        if entry is not None
+                        else self.config.provider
+                    ),
+                ),
+            )
+            return
+        index = parse_model_index(args)
+        if index is not None:
+            if not self._model_menu:
+                await self._send_chunks(ctx, MODEL_MENU_HINT)
+                return
+            if index < 1 or index > len(self._model_menu):
+                await self._send_chunks(
+                    ctx, model_index_out_of_range_text(index),
+                )
+                return
+            provider, model = self._model_menu[index - 1]
+            self.sessions.update_model(self.name, model, provider)
+            await self._send_chunks(ctx, model_set_text(model, provider))
             return
         try:
             selection = parse_model_selection(args)
         except ValueError:
             await self._send_chunks(
                 ctx,
-                "Usage: /model provider/model (or /model with no arguments)",
+                "Usage: /model #, /model provider/model "
+                "(or /model with no arguments)",
             )
             return
         self.sessions.update_model(
@@ -214,16 +261,23 @@ class PersonalityRuntime:
             ctx, model_set_text(selection.model, selection.provider),
         )
 
+    def _context_total(self, model: str | None) -> int | None:
+        if not model:
+            return None
+        return self.context_lengths.get(model)
+
     def _status_text(self) -> str:
         entry = self.sessions.get(self.name)
         age: float | None = None
         model = self.config.model
         provider = self.config.provider
+        consumed: int | None = None
         if entry is not None:
             if entry.hermes_session_id and entry.created_at:
                 age = max(0.0, self._clock() - entry.created_at)
             model = entry.model
             provider = entry.provider
+            consumed = entry.last_input_tokens
         return status_text(
             name=self.name,
             model=model,
@@ -232,6 +286,9 @@ class PersonalityRuntime:
             queue_depth=self._waiting,
             relay_count=self.relay_count,
             watchdog_state=self._watchdog_status(),
+            consumed_tokens=consumed,
+            context_total=self._context_total(model),
+            busy=self._run_id is not None,
         )
 
     # -- turns -----------------------------------------------------------------
@@ -239,10 +296,11 @@ class PersonalityRuntime:
     async def _handle_turn(self, ctx: Any, text: str) -> None:
         """Run or steer one non-command DM.
 
-        A DM that arrives while a run is in flight is steered into it (no ack,
-        no reply of its own — the running turn's reply covers it). If the
-        steer is refused because the turn just became terminal, fall back to a
-        normal turn, waiting on the per-personality lock.
+        The ack has already been sent by :meth:`handle_dm` for this DM. A DM
+        that arrives while a run is in flight is steered into it (no reply of
+        its own — the running turn's reply covers it). If the steer is refused
+        because the turn just became terminal, fall back to a normal turn,
+        waiting on the per-personality lock.
         """
         if self._run_id is not None and await self._try_steer(text):
             return
@@ -269,10 +327,6 @@ class PersonalityRuntime:
         return bool(accepted)
 
     async def _run_as_turn(self, ctx: Any, text: str) -> None:
-        sender = ctx.sender_hex
-        ack: PendingAck | None = await self.ack_policy.arm(
-            text, lambda ack_text: self.bot.send_dm(sender, ack_text),
-        )
         waiting = True
         self._waiting += 1
         try:
@@ -286,7 +340,6 @@ class PersonalityRuntime:
                         "without a reply",
                         self.name, submission.run_id,
                     )
-                    await ack.cancel()
                     return
                 self._run_id = submission.run_id
                 try:
@@ -295,8 +348,10 @@ class PersonalityRuntime:
                     )
                 finally:
                     self._run_id = None
-                # Stop a pending delayed ack before the real reply lands.
-                await ack.cancel()
+                if result.status == STATUS_COMPLETED:
+                    self.sessions.update_usage(
+                        self.name, result.input_tokens,
+                    )
                 if result.status != STATUS_COMPLETED:
                     await self._send_chunks(
                         ctx,
@@ -315,19 +370,15 @@ class PersonalityRuntime:
                 await self._send_chunks(ctx, final)
         except HermesError as exc:
             logger.warning("Hermes error for %s: %s", self.name, exc)
-            await ack.cancel()
             await self._send_chunks(ctx, error_text(self._error_detail(exc)))
         except asyncio.CancelledError:
-            await ack.cancel()
             raise
         except Exception:
             logger.exception("Turn failed for %s", self.name)
-            await ack.cancel()
             await self._send_chunks(ctx, error_text())
         finally:
             if waiting:
                 self._waiting -= 1
-            await ack.cancel()
 
     async def _submit_with_recovery(self, ctx: Any, text: str):
         event_id = getattr(ctx, "event_id", None) or uuid.uuid4().hex
@@ -345,6 +396,84 @@ class PersonalityRuntime:
             return await self.hermes.submit_run(
                 self.name, text, str(event_id),
             )
+
+    # -- immediate ack ---------------------------------------------------------
+
+    async def _send_ack(self, ctx: Any) -> None:
+        """Best-effort 👀 DM; never lets an ack failure break the turn."""
+        try:
+            await self._send_ack_event(ctx)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Could not send the ack DM for %s", self.name, exc_info=True,
+            )
+
+    async def _send_ack_event(self, ctx: Any) -> None:
+        """Build and publish the ack with a short NIP-40 expiry.
+
+        Mirrors ``NostrBot.send_dm``'s NIP-17 path (rumor + gift wrap, both
+        carrying the same expiration tag, delivered to the sender's kind-10050
+        inbox relays) but with ``ack_ttl_seconds`` instead of the bot's
+        seven-day ``dm_expiry_seconds``. A NIP-04 sender gets a plain kind-4
+        event with the same expiry.
+        """
+        from nostr_sdk import (
+            EventBuilder,
+            Kind,
+            KindStandard,
+            PublicKey,
+            RelayUrl,
+            SendEventTarget,
+            Tag,
+            nip59_make_gift_wrap_async,
+        )
+        from nostrbot_sdk import expiration_tag
+
+        sender_hex = getattr(ctx, "sender_hex", "") or ""
+        pk = PublicKey.parse(sender_hex)
+        ttl = self.ack_ttl_seconds
+        protocol = getattr(ctx, "protocol", "nip17") or "nip17"
+
+        if protocol == "nip04":
+            ciphertext = self.bot.signer.nip04_encrypt(pk, self.ack_text)
+            event = await (
+                EventBuilder(Kind(4), ciphertext)
+                .tags([Tag.public_key(pk), expiration_tag(ttl)])
+                .finalize_async(self.bot.signer)
+            )
+            await self.bot.client.send_event(event)
+            return
+
+        exp = expiration_tag(ttl)
+        rumor = (
+            EventBuilder(
+                Kind.from_std(KindStandard.PRIVATE_DIRECT_MESSAGE),
+                self.ack_text,
+            )
+            .tags([Tag.public_key(pk), exp])
+            .finalize_unsigned(self.bot.keys.public_key())
+        )
+        wrap = await nip59_make_gift_wrap_async(
+            self.bot.signer, pk, rumor, expiration=None, extra_tags=[exp],
+        )
+        relays = await self.bot.nip17_support.check(sender_hex)
+        if relays:
+            relay_urls = [RelayUrl.parse(relay) for relay in relays]
+            added: list[Any] = []
+            for relay_url in relay_urls:
+                if await self.bot.client.add_relay(relay_url):
+                    added.append(relay_url)
+            if added:
+                await self.bot.client.connect()
+            await self.bot.client.send_event(
+                wrap, target=SendEventTarget.to(relay_urls),
+            )
+            return
+        await self.bot.client.send_event(
+            wrap, target=SendEventTarget.broadcast(),
+        )
 
     async def _send_chunks(self, ctx: Any, text: str) -> None:
         for chunk in truncate_message(text):

@@ -3,21 +3,26 @@ from __future__ import annotations
 import pytest
 
 from nostr_hermes_proxy.commands import (
-    MAX_MODELS_SHOWN,
+    MODEL_MENU_HINT,
+    MODEL_MENU_PROMPT,
+    NO_MODELS_TEXT,
+    UNKNOWN_CONTEXT_HINT,
     ModelSelection,
+    context_line,
     error_text,
     format_model_label,
     format_session_age,
     help_text,
+    model_index_out_of_range_text,
     model_set_text,
-    models_text,
+    models_menu_text,
     new_text,
     parse_command,
+    parse_model_index,
     parse_model_selection,
     status_text,
     unknown_text,
 )
-from nostr_hermes_proxy.hermes import ModelOption
 
 
 def test_non_command_is_none():
@@ -48,7 +53,7 @@ def test_bare_slash_is_unknown():
 
 def test_reply_builders():
     assert "/new" in help_text()
-    assert new_text() == "New conversation started."
+    assert "/model #" in help_text()
     assert unknown_text("nope") == (
         "Unknown command /nope. Send /help for the command list."
     )
@@ -59,6 +64,17 @@ def test_reply_builders():
         "Model set to openrouter/claude."
     )
     assert format_model_label(None, None) == "gateway default"
+
+
+def test_new_text_echoes_model_and_context():
+    text = new_text("glm-5.3-flash", "aspark", 131072)
+    assert text.splitlines()[0] == "New conversation started."
+    assert "Model: aspark/glm-5.3-flash." in text
+    assert "Context: 131,072 tokens" in text
+
+    default = new_text()
+    assert "Model: gateway default." in default
+    assert UNKNOWN_CONTEXT_HINT in default
 
 
 def test_parse_model_selection_forms():
@@ -75,29 +91,60 @@ def test_parse_model_selection_forms():
         parse_model_selection("/claude")
 
 
-def test_models_text_formats_and_caps():
-    options = [
-        ModelOption("openrouter", f"model-{index}")
-        for index in range(MAX_MODELS_SHOWN + 5)
+def test_parse_model_index():
+    assert parse_model_index("1") == 1
+    assert parse_model_index(" 12 ") == 12
+    assert parse_model_index("+3") == 3
+    assert parse_model_index("-1") == -1
+    assert parse_model_index("0") == 0
+    assert parse_model_index("aspark/glm") is None
+    assert parse_model_index("") is None
+
+
+def test_models_menu_numbering_and_current_marker():
+    menu = [
+        ("aspark", "glm-5.3-flash"),
+        ("aspark", "glm-5.3"),
+        ("lspark", "deepseek-v4.1-flash"),
     ]
-    text = models_text(options)
-    assert text.startswith(f"Models ({MAX_MODELS_SHOWN + 5}):")
-    assert "- openrouter/model-0" in text
-    assert "... and 5 more" in text
-    assert text.count("- ") == MAX_MODELS_SHOWN + 1
-    assert "Use /model provider/model" in text
+    text = models_menu_text(
+        menu, current_model="glm-5.3", current_provider="aspark",
+    )
+    lines = text.splitlines()
+    assert lines[0] == "Models (3):"
+    assert lines[1] == "1. aspark/glm-5.3-flash"
+    assert lines[2] == "2. aspark/glm-5.3 ← current"
+    assert lines[3] == "3. lspark/deepseek-v4.1-flash"
+    assert lines[-1] == MODEL_MENU_PROMPT
 
 
-def test_models_text_handles_dicts_and_empty():
-    assert models_text([]) == "No models available."
-    text = models_text([
-        {"provider": "p", "model": "m"},
-        {"id": "n"},
-        "bare-model",
-    ])
-    assert "- p/m" in text
-    assert "- n" in text
-    assert "- bare-model" in text
+def test_models_menu_matches_by_model_when_provider_unpinned():
+    text = models_menu_text(
+        [("aspark", "glm-5.3-flash")],
+        current_model="glm-5.3-flash",
+        current_provider=None,
+    )
+    assert "1. aspark/glm-5.3-flash ← current" in text
+
+
+def test_models_menu_empty():
+    assert models_menu_text([]) == NO_MODELS_TEXT
+    assert "gateway config" in NO_MODELS_TEXT
+
+
+def test_model_index_hint_texts():
+    assert MODEL_MENU_HINT == "Send /model first to list available models."
+    assert MODEL_MENU_HINT in model_index_out_of_range_text(9)
+
+
+def test_context_line_variants():
+    assert context_line(None, 131072) == "Context: no turns yet"
+    assert context_line(45230, None) == (
+        "Context: 45,230 tokens (total unknown)"
+    )
+    assert context_line(45230, 131072) == (
+        "Context: 45,230 / 131,072 tokens (35%)"
+    )
 
 
 def test_session_age_format():
@@ -117,13 +164,33 @@ def test_status_text_contains_fields():
         queue_depth=2,
         relay_count=3,
         watchdog_state="ok",
+        consumed_tokens=45230,
+        context_total=131072,
+        busy=True,
     )
     assert "Personality: atlas" in text
     assert "Model: openrouter/claude" in text
     assert "Session: 2m" in text
+    assert "State: busy (turn in flight)" in text
+    assert "Context: 45,230 / 131,072 tokens (35%)" in text
     assert "Queue: 2 waiting" in text
     assert "Relays: 3" in text
     assert "Watchdog: ok" in text
+
+
+def test_status_text_idle_defaults():
+    text = status_text(
+        name="atlas",
+        model=None,
+        provider=None,
+        session_age_seconds=None,
+        queue_depth=0,
+        relay_count=1,
+        watchdog_state="ok",
+    )
+    assert "State: idle" in text
+    assert "Context: no turns yet" in text
+    assert "Model: gateway default" in text
 
 
 def test_error_text_is_short_and_optional_detail():

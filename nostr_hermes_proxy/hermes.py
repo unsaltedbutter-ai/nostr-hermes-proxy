@@ -77,6 +77,8 @@ class HermesRateLimitError(HermesError):
 class ModelOption:
     provider: str | None
     model: str
+    #: True when the gateway marks the owning provider as user-configured.
+    user_defined: bool = False
 
     @property
     def display(self) -> str:
@@ -102,6 +104,8 @@ class TurnResult:
     error: str | None = None
     #: True when the submission replayed an earlier run (duplicate DM).
     replayed: bool = False
+    #: ``usage.input_tokens`` from the terminal frame, when reported.
+    input_tokens: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -317,6 +321,7 @@ class HermesClient:
         pending_tools: dict[str, ToolEvent] = {}
         status = STATUS_INCOMPLETE
         error: str | None = None
+        input_tokens: int | None = None
         terminal = False
 
         url = f"/v1/runs/{quote(run_id, safe='')}/events"
@@ -355,6 +360,9 @@ class HermesClient:
                         output = self._extract_output(body)
                         if output:
                             final_parts = [output]
+                        usage_tokens = self._extract_input_tokens(body)
+                        if usage_tokens is not None:
+                            input_tokens = usage_tokens
                     elif name == "run.failed":
                         terminal = True
                         status = STATUS_FAILED
@@ -383,19 +391,22 @@ class HermesClient:
         if not terminal:
             polled = await self._poll_run(run_id)
             if polled is not None:
-                polled_status, polled_text, polled_error = polled
+                polled_status, polled_text, polled_error, polled_tokens = polled
                 if polled_status != STATUS_INCOMPLETE:
                     status = polled_status
                 if polled_text:
                     final_parts = [polled_text]
                 if polled_error:
                     error = polled_error
+                if polled_tokens is not None:
+                    input_tokens = polled_tokens
 
         return TurnResult(
             final_text="".join(final_parts),
             tool_summary=tools,
             status=status,
             error=error,
+            input_tokens=input_tokens,
         )
 
     async def steer(self, run_id: str, text: str) -> bool:
@@ -425,7 +436,7 @@ class HermesClient:
 
     async def _poll_run(
         self, run_id: str,
-    ) -> tuple[str, str, str | None] | None:
+    ) -> tuple[str, str, str | None, int | None] | None:
         """One ``GET /v1/runs/{run_id}`` fallback after an abnormal stream end."""
         url = f"/v1/runs/{quote(run_id, safe='')}"
         try:
@@ -460,7 +471,12 @@ class HermesClient:
             error = self._error_message(data) or "run cancelled"
         elif status == STATUS_INTERRUPTED:
             error = self._error_message(data) or "run interrupted"
-        return status, self._extract_output(data), error
+        return (
+            status,
+            self._extract_output(data),
+            error,
+            self._extract_input_tokens(data),
+        )
 
     # -- models ----------------------------------------------------------------
 
@@ -553,6 +569,33 @@ class HermesClient:
                 if isinstance(output, str):
                     return output
         return HermesClient._extract_text(body)
+
+    @staticmethod
+    def _extract_input_tokens(body: Any) -> int | None:
+        """Pull ``usage.input_tokens`` from a terminal/poll frame.
+
+        The live gateway carries ``usage`` on ``run.completed``; when it is
+        absent (older builds, failed runs) this returns None so the caller can
+        degrade gracefully.
+        """
+        if not isinstance(body, dict):
+            return None
+        usage = body.get("usage")
+        candidates: list[Any] = []
+        if isinstance(usage, dict):
+            candidates.append(usage.get("input_tokens"))
+        candidates.append(body.get("input_tokens"))
+        nested_data = body.get("data")
+        if isinstance(nested_data, dict):
+            nested_usage = nested_data.get("usage")
+            if isinstance(nested_usage, dict):
+                candidates.append(nested_usage.get("input_tokens"))
+        for value in candidates:
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int) and value >= 0:
+                return value
+        return None
 
     @staticmethod
     def _error_message(body: Any) -> str | None:
@@ -661,7 +704,9 @@ class HermesClient:
         options: list[ModelOption] = []
         seen: set[tuple[str | None, str]] = set()
 
-        def add(provider: Any, model: Any) -> None:
+        def add(
+            provider: Any, model: Any, *, user_defined: bool = False,
+        ) -> None:
             if isinstance(model, dict):
                 item = model
                 model_name = (
@@ -688,7 +733,9 @@ class HermesClient:
             if key in seen:
                 return
             seen.add(key)
-            options.append(ModelOption(provider_name, model_name))
+            options.append(
+                ModelOption(provider_name, model_name, user_defined),
+            )
 
         if isinstance(data, list):
             for item in data:
@@ -701,16 +748,24 @@ class HermesClient:
                         add(None, provider)
                         continue
                     provider_name = (
-                        provider.get("id")
+                        provider.get("slug")
+                        or provider.get("id")
                         or provider.get("provider")
                         or provider.get("name")
                     )
+                    user_defined = provider.get("is_user_defined") is True
                     models = provider.get("models")
                     if isinstance(models, list):
                         for model in models:
-                            add(provider_name, model)
+                            add(
+                                provider_name, model,
+                                user_defined=user_defined,
+                            )
                     elif models is not None:
-                        add(provider_name, models)
+                        add(
+                            provider_name, models,
+                            user_defined=user_defined,
+                        )
             models = data.get("models")
             if isinstance(models, list):
                 for model in models:
@@ -718,7 +773,10 @@ class HermesClient:
             options_field = data.get("options")
             if isinstance(options_field, (list, dict)):
                 for option in self._normalize_models(options_field):
-                    add(option.provider, option.model)
+                    add(
+                        option.provider, option.model,
+                        user_defined=option.user_defined,
+                    )
         return options
 
     # -- HTTP helpers ----------------------------------------------------------

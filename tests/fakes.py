@@ -11,42 +11,107 @@ from nostr_hermes_proxy.sessions import SessionMap
 
 
 @dataclass
-class FakePendingAck:
-    sent: bool = False
-    owner: "FakeAckPolicy | None" = None
+class SentEvent:
+    """One event handed to the fake relay client."""
 
-    async def cancel(self) -> bool:
-        if self.owner is not None:
-            self.owner.cancelled += 1
-        return self.sent
+    event: Any
+    target: Any = None
+
+    @property
+    def kind(self) -> int:
+        return self.event.kind().as_u16()
+
+    def expiration(self) -> int | None:
+        for tag in self.event.tags():
+            values = tag.to_vec()
+            if len(values) >= 2 and values[0] == "expiration":
+                try:
+                    return int(values[1])
+                except ValueError:
+                    return None
+        return None
 
 
-class FakeAckPolicy:
-    """Records arms/cancels without sending anything."""
+class FakeNostrClient:
+    """Records what the runtime publishes, without any relay I/O."""
 
-    def __init__(self) -> None:
-        self.armed: list[str] = []
-        self.cancelled = 0
-        self.pending: list[FakePendingAck] = []
+    def __init__(self, bot: "FakeBot") -> None:
+        self.bot = bot
+        self.added_relays: list[Any] = []
+        self.connect_calls = 0
+        self.sent_events: list[SentEvent] = []
 
-    async def arm(self, text: str, send) -> FakePendingAck:
-        self.armed.append(text)
-        pending = FakePendingAck(owner=self)
-        self.pending.append(pending)
-        return pending
+    async def add_relay(self, relay_url: Any) -> bool:
+        self.added_relays.append(relay_url)
+        return True
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+
+    async def send_event(self, event: Any, target: Any = None) -> None:
+        if self.bot.send_error is not None:
+            raise self.bot.send_error
+        self.bot.client.sent_events.append(SentEvent(event, target))
+        if self.bot.activity is not None:
+            self.bot.activity.append("ack")
+
+
+class FakeNip17Support:
+    def __init__(
+        self,
+        relays: list[str] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.relays = relays
+        self.error = error
+        self.checked: list[str] = []
+
+    async def check(self, pubkey_hex: str) -> list[str] | None:
+        self.checked.append(pubkey_hex)
+        if self.error is not None:
+            raise self.error
+        return self.relays
 
 
 class FakeBot:
-    def __init__(self, *, send_result: bool = True) -> None:
+    """Duck-types the NostrBot surface the runtime touches.
+
+    ``sent`` records ``send_dm`` calls; ``sent_events`` records every raw
+    event published by the ack path (NIP-17 gift wraps or kind-4 DMs). The
+    signer is a real ephemeral key so gift-wrap construction is exercised
+    for real; nothing leaves the process.
+    """
+
+    def __init__(
+        self,
+        *,
+        send_result: bool = True,
+        activity: list[str] | None = None,
+        nip17_relays: list[str] | None = None,
+        nip17_error: BaseException | None = None,
+        send_error: BaseException | None = None,
+    ) -> None:
+        from nostr_sdk import Keys
+
+        self.keys = Keys.generate()
+        self.signer = self.keys
         self.sent: list[tuple[str, str]] = []
         self.dm_handler = None
         self.started = 0
         self.stopped = 0
         self.send_result = send_result
+        self.activity = activity
+        self.send_error = send_error
+        self.nip17_support = FakeNip17Support(nip17_relays, nip17_error)
+        self.client = FakeNostrClient(self)
         # Watchdog hooks (opt-in per test by setting attributes).
         self.health_value: Any = True
         self.restart_calls = 0
         self.last_activity_monotonic: float | None = None
+
+    @property
+    def sent_events(self) -> list[SentEvent]:
+        return self.client.sent_events
 
     def on_dm(self, handler):
         self.dm_handler = handler
@@ -96,6 +161,33 @@ class FakeCtx:
     sender_hex: str
     sender_npub: str = ""
     event_id: str | None = None
+    protocol: str = "nip17"
+
+
+def provider_models(providers: list[Any]) -> list[ModelOption]:
+    """Flatten gateway-shaped provider dicts into ModelOptions.
+
+    Each item looks like ``{"slug": ..., "models": [...],
+    "is_user_defined": true}``, matching GET /api/model/options.
+    """
+    options: list[ModelOption] = []
+    for provider in providers:
+        if isinstance(provider, ModelOption):
+            options.append(provider)
+            continue
+        name = (
+            provider.get("slug")
+            or provider.get("id")
+            or provider.get("provider")
+            or provider.get("name")
+        )
+        user_defined = provider.get("is_user_defined") is True
+        for model in provider.get("models") or []:
+            if isinstance(model, dict):
+                model = model.get("id") or model.get("model")
+            if model:
+                options.append(ModelOption(name, str(model), user_defined))
+    return options
 
 
 class FakeHermes:
@@ -115,14 +207,22 @@ class FakeHermes:
         submissions: list[Any] | None = None,
         session_id: str = "sess-1",
         models: list[ModelOption] | None = None,
+        providers: list[Any] | None = None,
+        models_error: BaseException | None = None,
         steer_result: bool = True,
+        activity: list[str] | None = None,
     ) -> None:
         self.sessions = sessions
         self.session_id = session_id
-        self.models = models or []
+        self.models = list(models or [])
+        self.models_error = models_error
+        if providers is not None:
+            self.models = provider_models(providers)
+        self.activity = activity
         self.ensure_calls: list[str] = []
         self.create_calls: list[str] = []
         self.submit_calls: list[tuple[str, str, str]] = []
+        self.submitted_prefs: list[tuple[str | None, str | None]] = []
         self.stream_calls: list[str] = []
         self.steer_calls: list[tuple[str, str]] = []
         self.submissions: list[Any] = (
@@ -152,7 +252,16 @@ class FakeHermes:
         existing = self.sessions.get(name)
         if existing is not None and existing.hermes_session_id:
             return existing
-        return self.sessions.set(name, self.session_id)
+        previous = self.sessions.get(name)
+        # Mirror HermesClient.ensure_session: session recreation keeps the
+        # personality's model/provider preference.
+        self.sessions.reset(name)
+        return self.sessions.set(
+            name,
+            self.session_id,
+            model=previous.model if previous is not None else None,
+            provider=previous.provider if previous is not None else None,
+        )
 
     async def create_session(self, name: str) -> str:
         self.create_calls.append(name)
@@ -160,6 +269,8 @@ class FakeHermes:
         return self.session_id
 
     async def list_models(self) -> list[ModelOption]:
+        if self.models_error is not None:
+            raise self.models_error
         return list(self.models)
 
     def _next_submission(self) -> Any:
@@ -172,6 +283,12 @@ class FakeHermes:
 
     async def submit_run(self, name: str, text: str, event_id: str):
         self.submit_calls.append((name, text, event_id))
+        entry = self.sessions.get(name)
+        self.submitted_prefs.append(
+            (entry.model, entry.provider) if entry is not None else (None, None)
+        )
+        if self.activity is not None:
+            self.activity.append("submit")
         item = self._next_submission()
         if isinstance(item, BaseException):
             raise item
@@ -197,6 +314,8 @@ class FakeHermes:
 
     async def steer(self, run_id: str, text: str) -> bool:
         self.steer_calls.append((run_id, text))
+        if self.activity is not None:
+            self.activity.append("steer")
         item = (
             self.steer_results.pop(0)
             if self.steer_results
@@ -213,9 +332,9 @@ class PersonalityHarness:
     bot: Any
     hermes: FakeHermes
     sessions: SessionMap
-    ack: Any
     ctx: FakeCtx
     config: Any
+    activity: list[str]
 
 
 def make_harness(
@@ -227,26 +346,41 @@ def make_harness(
     submissions: list[Any] | None = None,
     steer_result: bool = True,
     models: list[ModelOption] | None = None,
+    providers: list[Any] | None = None,
+    models_error: BaseException | None = None,
     bot: Any | None = None,
-    ack: Any | None = None,
     tmp_path=None,
     config_model: str | None = None,
     config_provider: str | None = None,
+    ack_text: str = "👀",
+    ack_ttl_seconds: int = 1200,
+    context_lengths: dict[str, int] | None = None,
+    nip17_relays: list[str] | None = None,
+    send_error: BaseException | None = None,
+    protocol: str = "nip17",
     clock=None,
 ) -> PersonalityHarness:
     from nostr_hermes_proxy.config import PersonalityConfig
     from nostr_hermes_proxy.personality import PersonalityRuntime
 
+    activity: list[str] = []
     sessions = SessionMap(tmp_path / "sessions.json" if tmp_path else None)
-    fake_bot = bot if bot is not None else FakeBot(send_result=send_result)
+    fake_bot = bot if bot is not None else FakeBot(
+        send_result=send_result,
+        activity=activity,
+        nip17_relays=nip17_relays,
+        send_error=send_error,
+    )
     fake_hermes = FakeHermes(
         sessions,
         results=results,
         submissions=submissions,
         models=models,
+        providers=providers,
+        models_error=models_error,
         steer_result=steer_result,
+        activity=activity,
     )
-    fake_ack = ack if ack is not None else FakeAckPolicy()
     config = PersonalityConfig(
         name=name,
         nsec="nsec1synthetictestkeynotreal",
@@ -259,20 +393,23 @@ def make_harness(
         allow_hex=allow_hex,
         hermes=fake_hermes,
         sessions=sessions,
-        ack_policy=fake_ack,
+        ack_text=ack_text,
+        ack_ttl_seconds=ack_ttl_seconds,
+        context_lengths=context_lengths,
         bot=fake_bot,
         clock=clock,
     )
     ctx = FakeCtx(
         sender_hex=allow_hex,
         event_id="event-1",
+        protocol=protocol,
     )
     return PersonalityHarness(
         runtime=runtime,
         bot=fake_bot,
         hermes=fake_hermes,
         sessions=sessions,
-        ack=fake_ack,
         ctx=ctx,
         config=config,
+        activity=activity,
     )

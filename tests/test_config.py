@@ -31,7 +31,9 @@ def test_valid_config_parses(test_npub, test_hex):
     assert config.hermes_url == "http://127.0.0.1:8642"
     assert config.allow_hex == test_hex
     assert config.allow_npub == test_npub.lower()
-    assert config.ack_delay_seconds == 3.0
+    assert config.ack_text == "👀"
+    assert config.ack_ttl_seconds == 1200
+    assert config.context_lengths == {}
     assert len(config.personalities) == 1
     atlas = config.personalities[0]
     assert atlas.name == "atlas"
@@ -124,21 +126,75 @@ def test_explicit_provider_is_not_split(test_npub):
     assert personality.model == "anthropic/claude-sonnet"
 
 
-def test_ack_delay_and_watchdog_knobs(test_npub):
+def test_ack_and_watchdog_knobs(test_npub):
     text = config_text(
         test_npub,
         extra=(
-            "ack_delay_seconds = 0\n"
+            'ack_text = "✅"\n'
+            "ack_ttl_seconds = 90\n"
             "watchdog_interval_seconds = 5\n"
             "watchdog_failure_threshold = 7\n"
             "watchdog_stall_seconds = 30\n"
         ),
     )
     config = parse_config(text, environ=NSEC_ENV)
-    assert config.ack_delay_seconds == 0
+    assert config.ack_text == "✅"
+    assert config.ack_ttl_seconds == 90
     assert config.watchdog_interval_seconds == 5
     assert config.watchdog_failure_threshold == 7
     assert config.watchdog_stall_seconds == 30
+
+
+def test_context_lengths_table(test_npub):
+    text = config_text(
+        test_npub,
+        extra=(
+            "[context_lengths]\n"
+            '"glm-5.3-flash" = 131072\n'
+            '"claude" = 200000\n'
+        ),
+    )
+    config = parse_config(text, environ=NSEC_ENV)
+    assert config.context_lengths == {
+        "glm-5.3-flash": 131072,
+        "claude": 200000,
+    }
+
+
+def test_invalid_context_lengths_rejected(test_npub):
+    bad_value = config_text(
+        test_npub, extra='[context_lengths]\n"m" = 0\n',
+    )
+    with pytest.raises(ConfigError, match="context_lengths"):
+        parse_config(bad_value, environ=NSEC_ENV)
+
+    bad_type = config_text(
+        test_npub, extra='[context_lengths]\n"m" = "lots"\n',
+    )
+    with pytest.raises(ConfigError, match="context_lengths"):
+        parse_config(bad_type, environ=NSEC_ENV)
+
+    bad_table = config_text(test_npub, extra='context_lengths = 5\n')
+    with pytest.raises(ConfigError, match="context_lengths"):
+        parse_config(bad_table, environ=NSEC_ENV)
+
+
+def test_bad_ack_knobs_rejected(test_npub):
+    with pytest.raises(ConfigError, match="ack_ttl_seconds"):
+        parse_config(
+            config_text(test_npub, extra="ack_ttl_seconds = 59"),
+            environ=NSEC_ENV,
+        )
+    with pytest.raises(ConfigError, match="ack_ttl_seconds"):
+        parse_config(
+            config_text(test_npub, extra='ack_ttl_seconds = "soon"'),
+            environ=NSEC_ENV,
+        )
+    with pytest.raises(ConfigError, match="ack_text"):
+        parse_config(
+            config_text(test_npub, extra='ack_text = ""'),
+            environ=NSEC_ENV,
+        )
 
 
 def test_load_config_reads_file(tmp_path, test_npub):
@@ -147,12 +203,6 @@ def test_load_config_reads_file(tmp_path, test_npub):
     config = load_config(path, environ=NSEC_ENV)
     assert config.source == path
     assert config.personalities[0].name == "atlas"
-
-
-def test_negative_ack_delay_rejected(test_npub):
-    text = config_text(test_npub, extra="ack_delay_seconds = -1")
-    with pytest.raises(ConfigError, match="ack_delay_seconds"):
-        parse_config(text, environ=NSEC_ENV)
 
 
 def test_missing_personality_relays_rejected(test_npub):

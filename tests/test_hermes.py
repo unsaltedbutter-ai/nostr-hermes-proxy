@@ -202,6 +202,43 @@ async def test_deltas_survive_empty_terminal_output(client_factory):
     assert result.status == STATUS_COMPLETED
 
 
+async def test_run_completed_usage_is_captured(client_factory):
+    body = sse(
+        ("run.completed", {
+            "output": "done",
+            "usage": {"input_tokens": 45230, "output_tokens": 120},
+        }),
+    )
+    result = await client_factory(runs_handler(events=body)).run_turn(
+        "atlas", "x", "e",
+    )
+    assert result.input_tokens == 45230
+    assert result.status == STATUS_COMPLETED
+
+
+async def test_run_completed_without_usage_yields_none(client_factory):
+    body = sse(("run.completed", {"output": "done"}))
+    result = await client_factory(runs_handler(events=body)).run_turn(
+        "atlas", "x", "e",
+    )
+    assert result.input_tokens is None
+
+
+async def test_poll_fallback_captures_usage(client_factory):
+    body = sse(("message.delta", {"delta": "partial"}))
+    handler = runs_handler(
+        events=body,
+        poll={
+            "status": "completed",
+            "output": "final",
+            "usage": {"input_tokens": 777},
+        },
+    )
+    result = await client_factory(handler).run_turn("atlas", "x", "e")
+    assert result.status == STATUS_COMPLETED
+    assert result.input_tokens == 777
+
+
 async def test_keepalive_comments_are_skipped(client_factory):
     body = (
         b": keepalive\n\n"
@@ -527,6 +564,36 @@ async def test_list_models_normalizes(client_factory):
         ("p", "m"),
     ]
     assert options[0].display == "openrouter/claude"
+    assert all(not option.user_defined for option in options)
+
+
+async def test_list_models_reads_slug_and_user_defined(client_factory):
+    def handler(request):
+        return httpx.Response(200, json={
+            "providers": [
+                {
+                    "slug": "aspark",
+                    "name": "Aspark",
+                    "is_user_defined": True,
+                    "models": ["glm-5.3-flash", "glm-5.3"],
+                },
+                {
+                    "slug": "openrouter",
+                    "name": "OpenRouter",
+                    "is_user_defined": False,
+                    "models": ["claude"],
+                },
+            ],
+            "model": "glm-5.3-flash",
+            "provider": "aspark",
+        })
+
+    options = await client_factory(handler).list_models()
+    assert [(o.provider, o.model, o.user_defined) for o in options] == [
+        ("aspark", "glm-5.3-flash", True),
+        ("aspark", "glm-5.3", True),
+        ("openrouter", "claude", False),
+    ]
 
 
 async def test_missing_api_key_raises(monkeypatch, tmp_path):
