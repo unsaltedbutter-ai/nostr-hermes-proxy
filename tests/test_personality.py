@@ -748,3 +748,19 @@ def test_build_bot_passes_watchdog_stall_seconds(test_hex, monkeypatch):
     )
     assert captured["watchdog_stall_seconds"] == 7200.0
     assert captured["bot_config"] is not None
+
+
+def test_profile_metadata_merges_display_name_override(test_hex):
+    harness = make_harness(
+        allow_hex=test_hex,
+        profile={"name": "Fancy Display", "lud16": "bot@pay.example"},
+    )
+    assert harness.runtime._profile_metadata() == {
+        "name": "Fancy Display",
+        "lud16": "bot@pay.example",
+    }
+
+
+def test_profile_metadata_defaults_to_internal_name(test_hex):
+    harness = make_harness(allow_hex=test_hex)
+    assert harness.runtime._profile_metadata() == {"name": "atlas"}

@@ -305,3 +305,75 @@ def test_invalid_outbound_spread_rejected(test_npub, value):
             ),
             environ=NSEC_ENV,
         )
+
+
+def test_personality_profile_parses(test_npub):
+    text = config_text(
+        test_npub,
+        personality_extra=(
+            '[personality.profile]\n'
+            'about = "I help bitcoiners"\n'
+            'lud16 = "bot@pay.example"\n'
+            'nip05 = "bot@example"\n'
+            'name = "Fancy Display Name"'
+        ),
+    )
+    personality = parse_config(text, environ=NSEC_ENV).personalities[0]
+    assert personality.profile == {
+        "about": "I help bitcoiners",
+        "lud16": "bot@pay.example",
+        "nip05": "bot@example",
+        "name": "Fancy Display Name",
+    }
+
+
+def test_personality_profile_defaults_to_empty(test_npub):
+    personality = parse_config(
+        config_text(test_npub), environ=NSEC_ENV,
+    ).personalities[0]
+    assert personality.profile == {}
+
+
+def test_personality_profile_rejects_unknown_key(test_npub):
+    text = config_text(
+        test_npub,
+        personality_extra='[personality.profile]\nlocation = "the moon"',
+    )
+    with pytest.raises(ConfigError, match="unknown profile key"):
+        parse_config(text, environ=NSEC_ENV)
+
+
+def test_personality_profile_rejects_empty_value(test_npub):
+    text = config_text(
+        test_npub,
+        personality_extra='[personality.profile]\nabout = "  "',
+    )
+    with pytest.raises(ConfigError, match="profile.about"):
+        parse_config(text, environ=NSEC_ENV)
+
+
+def test_personality_profile_rejects_non_string(test_npub):
+    text = config_text(
+        test_npub,
+        personality_extra="[personality.profile]\nlud16 = 42",
+    )
+    with pytest.raises(ConfigError, match="profile.lud16"):
+        parse_config(text, environ=NSEC_ENV)
+
+
+def test_personality_profile_rejects_non_table(test_npub):
+    text = config_text(
+        test_npub,
+        personality_extra='profile = "not a table"',
+    )
+    with pytest.raises(ConfigError, match="profile must be a table"):
+        parse_config(text, environ=NSEC_ENV)
+
+
+def test_personality_profile_rejects_control_characters(test_npub):
+    text = config_text(
+        test_npub,
+        personality_extra='[personality.profile]\nabout = "two\\nlines"',
+    )
+    with pytest.raises(ConfigError, match="single-line"):
+        parse_config(text, environ=NSEC_ENV)

@@ -54,6 +54,15 @@ nsec = "${NSEC_ATLAS}"
 relays = ["wss://nos.lol", "wss://relay.damus.io"]
 # model = "anthropic/claude-sonnet-4"
 # provider = "openrouter"
+# Optional kind-0 metadata published on connect. Allowed keys: name
+# (display-name override), about, picture, nip05, lud16, website.
+# [personality.profile]
+# about = "I help bitcoiners mix their coins trustlessly over Nostr."
+# lud16 = "nostrmix-bot@pay.example"
+# nip05 = "nostrmix-bot@example"
+# picture = "https://example/bot.png"
+# website = "https://example"
+# name = "Fancy Display Name"
 
 # [[personality]]
 # name = "hermes"

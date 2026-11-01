@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,6 +28,11 @@ DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS = 7 * 24 * 60 * 60
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+# Keys allowed in a personality's published kind-0 metadata. ``name`` here
+# overrides the display name only (the internal identifier stays the
+# config-level ``name``).
+_PROFILE_KEYS = ("name", "about", "picture", "nip05", "lud16", "website")
 _LITERAL_NSEC_RE = re.compile(r"nsec1[0-9a-z]{10,}", re.IGNORECASE)
 
 _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -138,6 +143,10 @@ class PersonalityConfig:
     relays: tuple[str, ...]
     model: str | None = None
     provider: str | None = None
+    #: Extra kind-0 metadata published on connect (about/picture/nip05/
+    #: lud16/website, plus an optional ``name`` override for the display
+    #: name when it can't be the internal identifier).
+    profile: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -258,12 +267,33 @@ def _parse_personality(
         provider = None
     if model and provider is None and "/" in model:
         provider, model = model.split("/", 1)
+    profile_raw = table.get("profile", {})
+    if not isinstance(profile_raw, dict):
+        raise ConfigError(f"personality {name!r}: profile must be a table")
+    profile: dict[str, str] = {}
+    for key, value in profile_raw.items():
+        if key not in _PROFILE_KEYS:
+            raise ConfigError(
+                f"personality {name!r}: unknown profile key {key!r} "
+                f"(allowed: {', '.join(_PROFILE_KEYS)})"
+            )
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"personality {name!r}: profile.{key} must be a "
+                "non-empty string"
+            )
+        if any(ch in value for ch in "\n\r\t"):
+            raise ConfigError(
+                f"personality {name!r}: profile.{key} must be single-line"
+            )
+        profile[key] = value.strip()
     return PersonalityConfig(
         name=name,
         nsec=nsec,
         relays=relays,
         model=model,
         provider=provider,
+        profile=profile,
     )
 
 

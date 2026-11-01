@@ -114,13 +114,19 @@ class PersonalityRuntime:
         bot_config = NostrBotConfig(
             nsec=self.config.nsec,
             relays=list(self.config.relays),
-            profile={"name": self.config.name},
+            profile=self._profile_metadata(),
             # SDK-level stall detection (nostrbot-sdk >= 0.6.0): feeds
             # health_check(), which the process watchdog polls. None keeps
             # the SDK default (disabled) for injected fakes / older SDKs.
             watchdog_stall_seconds=self._watchdog_stall_seconds,
         )
         return NostrBot(bot_config)
+
+    def _profile_metadata(self) -> dict[str, str]:
+        """Kind-0 metadata: the internal name plus configured overrides."""
+        metadata = {"name": self.config.name}
+        metadata.update(self.config.profile)
+        return metadata
 
     @property
     def relay_count(self) -> int:

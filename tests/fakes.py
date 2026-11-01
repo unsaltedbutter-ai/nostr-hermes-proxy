@@ -392,6 +392,7 @@ def make_harness(
     protocol: str = "nip17",
     clock=None,
     decrypt_keys: list | None = None,
+    profile: dict[str, str] | None = None,
 ) -> PersonalityHarness:
     from nostr_hermes_proxy.config import PersonalityConfig
     from nostr_hermes_proxy.personality import PersonalityRuntime
@@ -432,6 +433,7 @@ def make_harness(
         relays=("wss://nos.lol", "wss://relay.example"),
         model=config_model,
         provider=config_provider,
+        profile=profile or {},
     )
     runtime = PersonalityRuntime(
         config,
