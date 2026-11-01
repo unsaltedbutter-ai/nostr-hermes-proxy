@@ -20,7 +20,8 @@ NO_MODELS_TEXT = (
     "Check the gateway config."
 )
 UNKNOWN_CONTEXT_HINT = (
-    "Context: unknown (add it under [context_lengths] in config.toml)"
+    "Context: unknown for this model (the gateway config has no "
+    "context_length for it)"
 )
 
 

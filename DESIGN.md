@@ -70,7 +70,7 @@ session mapping keeping each conversation separate.
 | **Hermes client** | `httpx` against `127.0.0.1:8642`, bearer `API_SERVER_KEY`. Session create / chat-stream / model-options / runs |
 | **Session map** | personality → Hermes session id, **persisted atomically** (tmp+replace, the hermes-nostr seen-IDs pattern). Create on first contact via `POST /api/sessions`. `/new` swaps it |
 | **Command layer** | `/new`, `/model`, `/status` parsed *before* forwarding. See §6 |
-| **Ack policy** | Immediate ack DM on accept, or delayed ack past a threshold (avoid ack+reply double-message on fast turns). Configurable |
+| **Ack policy** | Instant `👀` DM on every accepted non-command DM (including steers), with a 20-minute absolute NIP-40 expiry (`ack_text`/`ack_ttl_seconds` knobs). Built proxy-side (rumor + gift wrap via the SDK primitives) so it doesn't inherit the 7-day default |
 | **Tool verbosity** | From the turn's SSE stream: omit entirely, or one-line summary (tools used, duration, failures). Precedent: hermes-nostr's `format_tool_event` returns None — on Nostr every tool event would be its own gift wrap |
 | **Reply chunking** | ~4096 chars, code-fence-aware `(1/N)` splitting — port from gateway core's `truncate_message` (NOT in hermes-nostr or nostrbot-sdk) |
 | **Relay hygiene** | See §7 — the INCIDENTS.md remediations |
@@ -126,7 +126,7 @@ stream's terminal `done` frame carries a `run_id`.
 ```
 DM arrives on personality P (allowlisted sender)
   → dedup (SDK) → unwrap → allowlist check → persist seen
-  → send ack (per policy)
+  → send ack (instant 👀, 20-min expiry)
   → command? → handle locally (reply, no Hermes turn)
   → turn in flight? steer it (POST /v1/runs/{id}/steer) — VERIFIED (Probe C)
     : submit turn via POST /v1/runs (Idempotency-Key = gift-wrap event id;
@@ -145,9 +145,9 @@ Intercepted before Hermes, matched on the raw DM text:
 
 | Command | Behavior |
 |---|---|
-| `/new` | Create fresh session (`POST /api/sessions`), swap the map entry, ack "new conversation started". Optionally `DELETE` the old session or `POST .../fork` to keep it |
-| `/model` | List models (`GET /api/model/options`) or switch: store per-personality `{model, provider}` preference, sent on every turn request (per-request selection is always honored on session-chat endpoints) |
-| `/status` | Personality name, current model, session age, queue depth, relay statuses, gateway health (`GET /health/detailed`) |
+| `/new` | Create fresh session (`POST /api/sessions`), swap the map entry, echo "New conversation started. Model: <label>. Context: <total> tokens." Model/provider preferences are preserved across `/new` |
+| `/model` | No args: numbered menu of the gateway's models, read **live from `~/.hermes/config.yaml`** (enabled providers → their models; falls back to the API's user-defined inventory when unreadable). `/model N` switches to menu entry N; `/model provider/model` switches literally. The preference is sent on every turn request — no conversation restart needed |
+| `/status` | Personality, model, session age, **state (busy with an in-flight turn vs idle)**, **context consumed vs total with percentage** (consumed from the last turn's `usage.input_tokens`; total from the gateway config's `context_length`), queue depth, relay count, watchdog state |
 | `/stop` | (future) `POST /v1/runs/{run_id}/stop` for the in-flight turn — requires the `/v1/runs` flow |
 | `/help` | Command list |
 
@@ -250,7 +250,11 @@ hermes_url = "http://127.0.0.1:8642"
 # hermes_key from env: HERMES_API_KEY (API_SERVER_KEY value)
 allow_npub = "npub1… (owner's mobile npub)"
 
-ack_delay_seconds = 3          # ack only if no reply within N s (0 = always ack)
+ack_text = "👀"                # instant ack content on every non-command DM
+ack_ttl_seconds = 1200         # the ack expires 20 minutes after sending
+# Gateway config.yaml is read LIVE on every /model, /new, /status (menu +
+# context totals) — override the path only if it lives somewhere unusual:
+# hermes_config_path = "~/.hermes/config.yaml"
 
 [[personality]]
 name   = "atlas"

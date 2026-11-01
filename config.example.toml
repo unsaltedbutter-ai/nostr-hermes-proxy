@@ -19,10 +19,10 @@ allow_npub = "npub1REPLACE_WITH_OWNER_NPUB"
 ack_text = "👀"
 ack_ttl_seconds = 1200
 
-# Per-model context window, used by /new and /status. Keys are bare model ids
-# as they appear in /model; values are total tokens (integers > 0).
-# [context_lengths]
-# "glm-5.3-flash" = 131072
+# Context totals are read live from the gateway's config.yaml on every
+# /new and /status — no proxy-side table to maintain. Override the path
+# only if your Hermes config lives somewhere unusual:
+# hermes_config_path = "~/.hermes/config.yaml"
 
 # Defaults to ~/.local/state/nostr-hermes-proxy/
 # state_dir = "~/.local/state/nostr-hermes-proxy"

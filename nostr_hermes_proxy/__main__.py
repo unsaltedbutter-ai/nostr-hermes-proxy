@@ -52,7 +52,7 @@ def _build_runtime(config: Config) -> tuple[list[PersonalityRuntime], HermesClie
             sessions=sessions,
             ack_text=config.ack_text,
             ack_ttl_seconds=config.ack_ttl_seconds,
-            context_lengths=config.context_lengths,
+            gateway_config_path=config.hermes_config_path,
             watchdog_stall_seconds=config.watchdog_stall_seconds,
         )
         for personality in config.personalities

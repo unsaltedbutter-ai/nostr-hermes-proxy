@@ -123,16 +123,16 @@ Edit `config.toml`:
   fallback.
 - `ack_text` (default `"👀"`) and `ack_ttl_seconds` (default `1200`, minimum
   60) for the immediate ack.
-- `[context_lengths]` maps bare model ids to total context tokens, used by
-  `/new` and `/status`:
-
-  ```toml
-  [context_lengths]
-  "glm-5.3-flash" = 131072
-  ```
-
-  Models without an entry show `Context: unknown (add it under
-  [context_lengths] in config.toml)`; `/status` still reports consumed tokens.
+- `hermes_config_path` (default `~/.hermes/config.yaml`) — the gateway's
+  config file, **re-read live on every `/model`, `/new`, and `/status`** (no
+  caching): the `/model` menu lists the enabled providers and models defined
+  there, and context totals come from each model's `context_length`
+  (falling back to the top-level `model.context_length`). Change models in
+  the gateway and the proxy follows on the next command — nothing to keep
+  in sync. If the file is unreadable, `/model` falls back to the gateway
+  API's user-defined inventory and context shows as unknown. Models without
+  a context length show `Context: unknown for this model`; `/status` still
+  reports consumed tokens.
 
 Secrets come from the environment:
 

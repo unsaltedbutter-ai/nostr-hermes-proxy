@@ -185,6 +185,69 @@ async def test_model_number_out_of_range_hints(test_hex):
     assert harness.sessions.get("atlas") is None
 
 
+async def test_model_menu_reads_gateway_config_live(test_hex, tmp_path):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "model:\n"
+        "  provider: custom:aspark\n"
+        "  default: glm-5.3-flash\n"
+        "  context_length: 640000\n"
+        "providers:\n"
+        "  lspark:\n"
+        "    models:\n"
+        "      deepseek-v4.1-flash:\n"
+        "        context_length: 655360\n"
+        "  aspark:\n"
+        "    models:\n"
+        "      glm-5.3-flash:\n"
+        "        context_length: 640000\n"
+        "  huggingface:\n"
+        "    enabled: false\n"
+        "    models:\n"
+        "      hf-model:\n"
+        "        context_length: 1000\n",
+        encoding="utf-8",
+    )
+    harness = make_harness(
+        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+    )
+    await harness.runtime.handle_dm(harness.ctx, "/model")
+    reply = harness.bot.sent[-1][1]
+    assert "1. lspark/deepseek-v4.1-flash" in reply
+    assert "2. aspark/glm-5.3-flash" in reply
+    assert "hf-model" not in reply  # disabled providers are skipped
+    assert "Reply /model # to switch." in reply
+    # The menu comes from the gateway's config.yaml, not the API inventory.
+    assert harness.hermes.models_calls == 0
+
+    # Live re-read, no caching: a provider added to the gateway config
+    # shows up on the next /model — no proxy restart, no code change.
+    with gateway_yaml.open("a", encoding="utf-8") as fh:
+        fh.write(
+            "  newprov:\n"
+            "    models:\n"
+            "      new-model:\n"
+            "        context_length: 1000\n"
+        )
+    await harness.runtime.handle_dm(harness.ctx, "/model")
+    assert "3. newprov/new-model" in harness.bot.sent[-1][1]
+
+
+async def test_model_menu_falls_back_to_api_without_gateway_config(test_hex):
+    harness = make_harness(
+        allow_hex=test_hex,
+        gateway_config_path="/nonexistent/config.yaml",
+        providers=[
+            {"slug": "aspark", "models": ["glm-5.3-flash"],
+             "is_user_defined": True},
+        ],
+    )
+    await harness.runtime.handle_dm(harness.ctx, "/model")
+    reply = harness.bot.sent[-1][1]
+    assert "1. aspark/glm-5.3-flash" in reply
+    assert harness.hermes.models_calls == 1
+
+
 async def test_model_set_command_persists(test_hex):
     harness = make_harness(allow_hex=test_hex)
     await harness.runtime.handle_dm(harness.ctx, "/model openrouter/claude")
@@ -202,11 +265,24 @@ async def test_model_set_bad_usage(test_hex):
 
 
 async def test_new_command_swaps_session_and_echoes_model_and_context(
-    test_hex,
+    test_hex, tmp_path,
 ):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "model:\n"
+        "  provider: custom:aspark\n"
+        "  default: glm-5.3-flash\n"
+        "  context_length: 640000\n"
+        "providers:\n"
+        "  aspark:\n"
+        "    models:\n"
+        "      glm-5.3-flash:\n"
+        "        context_length: 131072\n",
+        encoding="utf-8",
+    )
     harness = make_harness(
         allow_hex=test_hex,
-        context_lengths={"glm-5.3-flash": 131072},
+        gateway_config_path=str(gateway_yaml),
     )
     harness.sessions.set(
         "atlas", "old-session", model="glm-5.3-flash", provider="aspark",
@@ -223,13 +299,46 @@ async def test_new_command_swaps_session_and_echoes_model_and_context(
     assert "Context: 131,072 tokens" in reply
 
 
-async def test_new_command_unknown_context_variant(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+async def test_new_command_unknown_context_variant(test_hex, tmp_path):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "model:\n"
+        "  provider: custom:aspark\n"
+        "  default: glm-5.3-flash\n"
+        "  context_length: 640000\n",
+        encoding="utf-8",
+    )
+    harness = make_harness(
+        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+    )
     harness.sessions.set("atlas", "old-session", model="mystery", provider="p")
     await harness.runtime.handle_dm(harness.ctx, "/new")
     reply = harness.bot.sent[-1][1]
     assert "Model: p/mystery." in reply
-    assert "Context: unknown (add it under [context_lengths]" in reply
+    # "mystery" is not the gateway default and no provider lists it, so the
+    # per-model lookup misses and the top-level default must NOT be applied.
+    assert "Context: unknown for this model" in reply
+
+
+async def test_new_command_default_model_falls_back_to_gateway_context(
+    test_hex, tmp_path,
+):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "model:\n"
+        "  provider: custom:aspark\n"
+        "  default: glm-5.3-flash\n"
+        "  context_length: 640000\n",
+        encoding="utf-8",
+    )
+    harness = make_harness(
+        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+    )
+    harness.sessions.set(
+        "atlas", "old-session", model="glm-5.3-flash", provider="aspark",
+    )
+    await harness.runtime.handle_dm(harness.ctx, "/new")
+    assert "Context: 640,000 tokens" in harness.bot.sent[-1][1]
 
 
 async def test_new_command_without_preferences_says_gateway_default(test_hex):
@@ -255,13 +364,22 @@ async def test_status_command(test_hex, clock):
     assert harness.hermes.submit_calls == []
 
 
-async def test_status_context_uses_last_turn_usage_and_config_total(
-    test_hex, clock,
+async def test_status_context_uses_last_turn_usage_and_gateway_total(
+    test_hex, clock, tmp_path,
 ):
+    gateway_yaml = tmp_path / "config.yaml"
+    gateway_yaml.write_text(
+        "providers:\n"
+        "  openrouter:\n"
+        "    models:\n"
+        "      claude:\n"
+        "        context_length: 131072\n",
+        encoding="utf-8",
+    )
     harness = make_harness(
         allow_hex=test_hex,
         clock=clock,
-        context_lengths={"claude": 131072},
+        gateway_config_path=str(gateway_yaml),
     )
     harness.sessions.set(
         "atlas", "sess-1", model="claude", provider="openrouter",

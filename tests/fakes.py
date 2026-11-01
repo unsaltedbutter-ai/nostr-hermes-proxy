@@ -215,6 +215,7 @@ class FakeHermes:
         self.sessions = sessions
         self.session_id = session_id
         self.models = list(models or [])
+        self.models_calls = 0
         self.models_error = models_error
         if providers is not None:
             self.models = provider_models(providers)
@@ -269,6 +270,7 @@ class FakeHermes:
         return self.session_id
 
     async def list_models(self) -> list[ModelOption]:
+        self.models_calls += 1
         if self.models_error is not None:
             raise self.models_error
         return list(self.models)
@@ -354,7 +356,7 @@ def make_harness(
     config_provider: str | None = None,
     ack_text: str = "👀",
     ack_ttl_seconds: int = 1200,
-    context_lengths: dict[str, int] | None = None,
+    gateway_config_path: str | None = None,
     nip17_relays: list[str] | None = None,
     send_error: BaseException | None = None,
     protocol: str = "nip17",
@@ -395,7 +397,7 @@ def make_harness(
         sessions=sessions,
         ack_text=ack_text,
         ack_ttl_seconds=ack_ttl_seconds,
-        context_lengths=context_lengths,
+        gateway_config_path=gateway_config_path,
         bot=fake_bot,
         clock=clock,
     )

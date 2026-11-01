@@ -10,13 +10,14 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 DEFAULT_STATE_DIR = "~/.local/state/nostr-hermes-proxy"
 DEFAULT_ACK_TEXT = "👀"
 DEFAULT_ACK_TTL_SECONDS = 1200
+DEFAULT_HERMES_CONFIG_PATH = "~/.hermes/config.yaml"
 DEFAULT_WATCHDOG_INTERVAL_SECONDS = 60.0
 DEFAULT_WATCHDOG_FAILURE_THRESHOLD = 3
 DEFAULT_WATCHDOG_STALL_SECONDS = 2 * 60 * 60
@@ -144,7 +145,7 @@ class Config:
     ack_ttl_seconds: int
     personalities: tuple[PersonalityConfig, ...]
     state_dir: Path
-    context_lengths: Mapping[str, int] = field(default_factory=dict)
+    hermes_config_path: str = DEFAULT_HERMES_CONFIG_PATH
     watchdog_interval_seconds: float = DEFAULT_WATCHDOG_INTERVAL_SECONDS
     watchdog_failure_threshold: int = DEFAULT_WATCHDOG_FAILURE_THRESHOLD
     watchdog_stall_seconds: float = DEFAULT_WATCHDOG_STALL_SECONDS
@@ -257,24 +258,13 @@ def _parse_personality(
     )
 
 
-def _parse_context_lengths(raw: Any, *, source: str) -> dict[str, int]:
-    """Parse ``[context_lengths]`` (bare model id -> total token count)."""
+def _parse_hermes_config_path(raw: Any, *, source: str) -> str:
+    """Validate the gateway ``config.yaml`` path (read live, never cached)."""
     if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise ConfigError(f"{source}: context_lengths must be a TOML table")
-    lengths: dict[str, int] = {}
-    for model, value in raw.items():
-        if not isinstance(model, str) or not model.strip():
-            raise ConfigError(
-                f"{source}: context_lengths keys must be model ids"
-            )
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ConfigError(
-                f"{source}: context_lengths[{model!r}] must be an integer > 0"
-            )
-        lengths[model.strip()] = value
-    return lengths
+        return DEFAULT_HERMES_CONFIG_PATH
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(f"{source}: hermes_config_path must be a path string")
+    return raw.strip()
 
 
 def parse_config(
@@ -319,8 +309,8 @@ def parse_config(
         raise ConfigError(f"{source}: ack_ttl_seconds must be an integer") from exc
     if isinstance(ack_ttl_raw, bool) or ack_ttl < 60:
         raise ConfigError(f"{source}: ack_ttl_seconds must be >= 60")
-    context_lengths = _parse_context_lengths(
-        data.get("context_lengths"), source=source,
+    hermes_config_path = _parse_hermes_config_path(
+        data.get("hermes_config_path"), source=source,
     )
 
     raw_personalities = data.get("personality", data.get("personalities", []))
@@ -385,7 +375,7 @@ def parse_config(
         ack_ttl_seconds=ack_ttl,
         personalities=personalities,
         state_dir=state_dir,
-        context_lengths=context_lengths,
+        hermes_config_path=hermes_config_path,
         watchdog_interval_seconds=watchdog_interval,
         watchdog_failure_threshold=watchdog_threshold,
         watchdog_stall_seconds=watchdog_stall,

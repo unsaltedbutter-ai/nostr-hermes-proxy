@@ -33,7 +33,7 @@ def test_valid_config_parses(test_npub, test_hex):
     assert config.allow_npub == test_npub.lower()
     assert config.ack_text == "👀"
     assert config.ack_ttl_seconds == 1200
-    assert config.context_lengths == {}
+    assert config.hermes_config_path == "~/.hermes/config.yaml"
     assert len(config.personalities) == 1
     atlas = config.personalities[0]
     assert atlas.name == "atlas"
@@ -145,38 +145,18 @@ def test_ack_and_watchdog_knobs(test_npub):
     assert config.watchdog_stall_seconds == 30
 
 
-def test_context_lengths_table(test_npub):
+def test_hermes_config_path_custom(test_npub):
     text = config_text(
-        test_npub,
-        extra=(
-            "[context_lengths]\n"
-            '"glm-5.3-flash" = 131072\n'
-            '"claude" = 200000\n'
-        ),
+        test_npub, extra='hermes_config_path = "~/custom/hermes.yaml"\n',
     )
     config = parse_config(text, environ=NSEC_ENV)
-    assert config.context_lengths == {
-        "glm-5.3-flash": 131072,
-        "claude": 200000,
-    }
+    assert config.hermes_config_path == "~/custom/hermes.yaml"
 
 
-def test_invalid_context_lengths_rejected(test_npub):
-    bad_value = config_text(
-        test_npub, extra='[context_lengths]\n"m" = 0\n',
-    )
-    with pytest.raises(ConfigError, match="context_lengths"):
-        parse_config(bad_value, environ=NSEC_ENV)
-
-    bad_type = config_text(
-        test_npub, extra='[context_lengths]\n"m" = "lots"\n',
-    )
-    with pytest.raises(ConfigError, match="context_lengths"):
-        parse_config(bad_type, environ=NSEC_ENV)
-
-    bad_table = config_text(test_npub, extra='context_lengths = 5\n')
-    with pytest.raises(ConfigError, match="context_lengths"):
-        parse_config(bad_table, environ=NSEC_ENV)
+def test_hermes_config_path_blank_rejected(test_npub):
+    text = config_text(test_npub, extra='hermes_config_path = "  "\n')
+    with pytest.raises(ConfigError, match="hermes_config_path"):
+        parse_config(text, environ=NSEC_ENV)
 
 
 def test_bad_ack_knobs_rejected(test_npub):

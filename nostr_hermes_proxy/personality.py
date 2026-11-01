@@ -12,7 +12,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 from .chunking import truncate_message
 from .commands import (
@@ -31,6 +31,7 @@ from .commands import (
     unknown_text,
 )
 from .config import DEFAULT_ACK_TEXT, DEFAULT_ACK_TTL_SECONDS, PersonalityConfig
+from .gateway_config import GatewayConfigError, GatewayModels, read_gateway_models
 from .hermes import (
     STATUS_COMPLETED,
     HermesAuthError,
@@ -55,7 +56,7 @@ class PersonalityRuntime:
         sessions: SessionMap,
         ack_text: str = DEFAULT_ACK_TEXT,
         ack_ttl_seconds: int = DEFAULT_ACK_TTL_SECONDS,
-        context_lengths: Mapping[str, int] | None = None,
+        gateway_config_path: str | None = None,
         watchdog_stall_seconds: float | None = None,
         bot: Any | None = None,
         clock: Callable[[], float] = time.time,
@@ -67,7 +68,10 @@ class PersonalityRuntime:
         self.sessions = sessions
         self.ack_text = ack_text
         self.ack_ttl_seconds = int(ack_ttl_seconds)
-        self.context_lengths = dict(context_lengths or {})
+        #: The gateway's config.yaml path, re-read live on every /model,
+        #: /new, and /status — never cached — so gateway-side model changes
+        # need no proxy updates.
+        self._gateway_config_path = gateway_config_path
         #: Last successful /model listing, for "/model #" resolution.
         self._model_menu: list[tuple[str | None, str]] = []
         self._watchdog_stall_seconds = watchdog_stall_seconds
@@ -198,22 +202,28 @@ class PersonalityRuntime:
             self.name, session_id, model=model, provider=provider,
         )
         await self._send_chunks(
-            ctx, new_text(model, provider, self._context_total(model)),
+            ctx, new_text(model, provider, self._context_total(model, provider)),
         )
 
     async def _command_model(self, ctx: Any, args: str) -> None:
         if not args:
-            try:
-                options = await self.hermes.list_models()
-            except HermesError as exc:
-                logger.warning("Could not list models for %s: %s", self.name, exc)
-                await self._send_chunks(ctx, error_text(self._error_detail(exc)))
-                return
-            menu = [
-                (option.provider, option.model)
-                for option in options
-                if getattr(option, "user_defined", False)
-            ]
+            menu = self._gateway_menu()
+            if menu is None:
+                try:
+                    options = await self.hermes.list_models()
+                except HermesError as exc:
+                    logger.warning(
+                        "Could not list models for %s: %s", self.name, exc,
+                    )
+                    await self._send_chunks(
+                        ctx, error_text(self._error_detail(exc)),
+                    )
+                    return
+                menu = [
+                    (option.provider, option.model)
+                    for option in options
+                    if getattr(option, "user_defined", False)
+                ]
             self._model_menu = menu
             entry = self.sessions.get(self.name)
             await self._send_chunks(
@@ -261,10 +271,39 @@ class PersonalityRuntime:
             ctx, model_set_text(selection.model, selection.provider),
         )
 
-    def _context_total(self, model: str | None) -> int | None:
-        if not model:
+    def _gateway_menu(self) -> list[tuple[str | None, str]] | None:
+        """Fresh model menu from the gateway's config.yaml, or None.
+
+        Returns None (and logs) when the file is unreadable/empty so the
+        caller can fall back to the gateway API inventory. Reads happen on
+        every command — never cached.
+        """
+        if not self._gateway_config_path:
             return None
-        return self.context_lengths.get(model)
+        try:
+            models: GatewayModels = read_gateway_models(
+                self._gateway_config_path,
+            )
+        except GatewayConfigError as exc:
+            logger.warning(
+                "Could not read the gateway config for %s: %s", self.name, exc,
+            )
+            return None
+        return list(models.menu)
+
+    def _context_total(
+        self, model: str | None, provider: str | None = None,
+    ) -> int | None:
+        """Fresh context total for the model, or None when unknown."""
+        if not model or not self._gateway_config_path:
+            return None
+        try:
+            models: GatewayModels = read_gateway_models(
+                self._gateway_config_path,
+            )
+        except GatewayConfigError:
+            return None
+        return models.context_length(provider, model)
 
     def _status_text(self) -> str:
         entry = self.sessions.get(self.name)
@@ -287,7 +326,7 @@ class PersonalityRuntime:
             relay_count=self.relay_count,
             watchdog_state=self._watchdog_status(),
             consumed_tokens=consumed,
-            context_total=self._context_total(model),
+            context_total=self._context_total(model, provider),
             busy=self._run_id is not None,
         )
 
