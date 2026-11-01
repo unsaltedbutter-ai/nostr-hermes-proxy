@@ -150,6 +150,7 @@ class Config:
     personalities: tuple[PersonalityConfig, ...]
     state_dir: Path
     hermes_config_path: str = DEFAULT_HERMES_CONFIG_PATH
+    outbound_spread_seconds: int = 3600
     watchdog_interval_seconds: float = DEFAULT_WATCHDOG_INTERVAL_SECONDS
     watchdog_failure_threshold: int = DEFAULT_WATCHDOG_FAILURE_THRESHOLD
     watchdog_stall_seconds: float = DEFAULT_WATCHDOG_STALL_SECONDS
@@ -320,6 +321,15 @@ def parse_config(
     hermes_config_path = _parse_hermes_config_path(
         data.get("hermes_config_path"), source=source,
     )
+    spread_raw = data.get("outbound_spread_seconds", 3600)
+    try:
+        outbound_spread = int(spread_raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{source}: outbound_spread_seconds must be an integer"
+        ) from exc
+    if isinstance(spread_raw, bool) or outbound_spread <= 0:
+        raise ConfigError(f"{source}: outbound_spread_seconds must be > 0")
 
     raw_personalities = data.get("personality", data.get("personalities", []))
     if not isinstance(raw_personalities, list) or not raw_personalities:
@@ -432,6 +442,7 @@ def parse_config(
         personalities=personalities,
         state_dir=state_dir,
         hermes_config_path=hermes_config_path,
+        outbound_spread_seconds=outbound_spread,
         watchdog_interval_seconds=watchdog_interval,
         watchdog_failure_threshold=watchdog_threshold,
         watchdog_stall_seconds=watchdog_stall,

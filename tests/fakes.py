@@ -53,7 +53,28 @@ class FakeNostrClient:
             raise self.bot.send_error
         self.bot.client.sent_events.append(SentEvent(event, target))
         if self.bot.activity is not None:
-            self.bot.activity.append("ack")
+            # Both acks and replies are published through send_event now;
+            # callers filter by kind when they need to tell them apart.
+            self.bot.activity.append("send")
+        if event.kind().as_u16() != 1059:
+            return
+        # Decrypt gift wraps for any test key we hold so text assertions keep
+        # working against ``bot.sent`` regardless of the delivery path.
+        from nostr_sdk import UnwrappedGift
+
+        for key in self.bot.decrypt_keys:
+            try:
+                unwrapped = UnwrappedGift.from_gift_wrap(key, event)
+            except Exception:
+                continue
+            rumor = unwrapped.rumor()
+            recipient = ""
+            for tag in rumor.tags():
+                values = tag.to_vec()
+                if len(values) >= 2 and values[0] == "p":
+                    recipient = values[1]
+                    break
+            self.bot.sent.append((recipient, rumor.content()))
 
 
 class FakeNip17Support:
@@ -76,10 +97,11 @@ class FakeNip17Support:
 class FakeBot:
     """Duck-types the NostrBot surface the runtime touches.
 
-    ``sent`` records ``send_dm`` calls; ``sent_events`` records every raw
-    event published by the ack path (NIP-17 gift wraps or kind-4 DMs). The
-    signer is a real ephemeral key so gift-wrap construction is exercised
-    for real; nothing leaves the process.
+    ``sent`` records decrypted DMs (both acks and replies, when a matching
+    ``decrypt_keys`` entry was supplied); ``sent_events`` records every raw
+    event published (NIP-17 gift wraps or kind-4 DMs). The signer is a real
+    ephemeral key so gift-wrap construction is exercised for real; nothing
+    leaves the process.
     """
 
     def __init__(
@@ -90,11 +112,13 @@ class FakeBot:
         nip17_relays: list[str] | None = None,
         nip17_error: BaseException | None = None,
         send_error: BaseException | None = None,
+        decrypt_keys: list | None = None,
     ) -> None:
         from nostr_sdk import Keys
 
         self.keys = Keys.generate()
         self.signer = self.keys
+        self.decrypt_keys = list(decrypt_keys or [])
         self.sent: list[tuple[str, str]] = []
         self.dm_handler = None
         self.started = 0
@@ -341,12 +365,13 @@ class PersonalityHarness:
     ctx: FakeCtx
     config: Any
     activity: list[str]
+    owner: Any | None = None
 
 
 def make_harness(
     *,
     name: str = "atlas",
-    allow_hex: str,
+    allow_hex: str | None = None,
     send_result: bool = True,
     results: list[Any] | None = None,
     submissions: list[Any] | None = None,
@@ -366,17 +391,29 @@ def make_harness(
     send_error: BaseException | None = None,
     protocol: str = "nip17",
     clock=None,
+    decrypt_keys: list | None = None,
 ) -> PersonalityHarness:
     from nostr_hermes_proxy.config import PersonalityConfig
     from nostr_hermes_proxy.personality import PersonalityRuntime
 
     activity: list[str] = []
+    owner = None
+    if allow_hex is None:
+        # A real owner keypair lets the fake client decrypt what it publishes,
+        # so tests can keep asserting on plaintext without a fixed test hex.
+        from nostr_sdk import Keys
+
+        owner = Keys.generate()
+        allow_hex = owner.public_key().to_hex()
+        if decrypt_keys is None:
+            decrypt_keys = [owner]
     sessions = SessionMap(tmp_path / "sessions.json" if tmp_path else None)
     fake_bot = bot if bot is not None else FakeBot(
         send_result=send_result,
         activity=activity,
         nip17_relays=nip17_relays,
         send_error=send_error,
+        decrypt_keys=decrypt_keys,
     )
     fake_hermes = FakeHermes(
         sessions,
@@ -420,4 +457,5 @@ def make_harness(
         ctx=ctx,
         config=config,
         activity=activity,
+        owner=owner,
     )

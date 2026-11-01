@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 import uuid
 from typing import Any, Callable
@@ -68,6 +69,7 @@ class PersonalityRuntime:
         sessions: SessionMap,
         ack_text: str = DEFAULT_ACK_TEXT,
         ack_ttl_seconds: int = DEFAULT_ACK_TTL_SECONDS,
+        outbound_spread_seconds: int = 3600,
         gateway_config_path: str | None = None,
         watchdog_stall_seconds: float | None = None,
         outbound_expiry_max_seconds: int = DEFAULT_OUTBOUND_EXPIRY_MAX_SECONDS,
@@ -81,6 +83,7 @@ class PersonalityRuntime:
         self.sessions = sessions
         self.ack_text = ack_text
         self.ack_ttl_seconds = int(ack_ttl_seconds)
+        self._outbound_spread_seconds = int(outbound_spread_seconds)
         #: The gateway's config.yaml path, re-read live on every /model,
         #: /new, and /status — never cached — so gateway-side model changes
         # need no proxy updates.
@@ -524,8 +527,24 @@ class PersonalityRuntime:
             if expiry_seconds is None
             else self._clamp_expiry(expiry_seconds)
         )
-        for index, chunk in enumerate(chunks, start=1):
-            await self._deliver_chunk(recipient_hex, chunk, ttl, protocol)
+        # NIP-59 randomizes wrap timestamps up to 2 days back, which scrambles
+        # multi-chunk ordering in clients. Assign each chunk a random backdate
+        # within the spread window, sorted ASCENDING: chunk 1 gets the smallest
+        # backdate (the newest wrap), so clients show chunks in reading order
+        # while every wrap still carries an individually random NIP-59-looking
+        # timestamp.
+        now = int(self._clock())
+        backdates = sorted(
+            (
+                random.randint(0, self._outbound_spread_seconds)
+                for _ in chunks
+            ),
+        )
+        for index, (chunk, backdate) in enumerate(zip(chunks, backdates), start=1):
+            await self._deliver_chunk(
+                recipient_hex, chunk, ttl, protocol,
+                wrap_created_at=now - backdate,
+            )
             logger.info(
                 "Outbound chunk %d/%d to %s (%d chars)",
                 index, len(chunks), recipient_hex[:16], len(chunk),
@@ -547,6 +566,7 @@ class PersonalityRuntime:
         text: str,
         ttl: int | None,
         protocol: str,
+        wrap_created_at: int | None = None,
     ) -> None:
         from nostr_sdk import (
             EventBuilder,
@@ -556,9 +576,9 @@ class PersonalityRuntime:
             RelayUrl,
             SendEventTarget,
             Tag,
-            nip59_make_gift_wrap_async,
         )
         from nostrbot_sdk import expiration_tag
+        from nostrbot_sdk.gift_wrap import make_gift_wrap_async
 
         pk = PublicKey.parse(recipient_hex)
 
@@ -592,8 +612,13 @@ class PersonalityRuntime:
             .tags([Tag.public_key(pk), exp])
             .finalize_unsigned(self.bot.keys.public_key())
         )
-        wrap = await nip59_make_gift_wrap_async(
-            self.bot.signer, pk, rumor, expiration=None, extra_tags=[exp],
+        wrap = await make_gift_wrap_async(
+            self.bot.signer,
+            pk,
+            rumor,
+            expiration=None,
+            extra_tags=[exp],
+            wrap_created_at=wrap_created_at,
         )
         relays = await self.bot.nip17_support.check(recipient_hex)
         if relays:
@@ -631,19 +656,16 @@ class PersonalityRuntime:
             )
 
     async def _send_chunks(self, ctx: Any, text: str) -> None:
-        for chunk in truncate_message(text):
-            try:
-                ok = await self.bot.send_dm(ctx.sender_hex, chunk)
-            except Exception:
-                logger.exception("Failed to send a DM chunk for %s", self.name)
-                return
-            if ok is False:
-                logger.warning("send_dm reported failure for %s", self.name)
-                return
-            logger.info(
-                "Sent reply chunk to %s (%d chars)", ctx.sender_hex[:16],
-                len(chunk),
+        """Reply path: ordered, chunked delivery through ``deliver_dm``."""
+        try:
+            await self.deliver_dm(
+                ctx.sender_hex,
+                text,
+                expiry_seconds=self._outbound_expiry_max_seconds,
+                protocol=getattr(ctx, "protocol", None) or "nip17",
             )
+        except Exception:
+            logger.exception("Failed to send a reply DM for %s", self.name)
 
     @staticmethod
     def _error_detail(exc: HermesError) -> str:

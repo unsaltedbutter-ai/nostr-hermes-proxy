@@ -22,7 +22,7 @@ async def wait_for(predicate, attempts: int = 50) -> None:
 
 
 async def test_non_allowlisted_sender_is_dropped(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     intruder = FakeCtx(sender_hex="ab" * 32, event_id="e")
     await harness.runtime.handle_dm(intruder, "hello")
     assert harness.bot.sent == []
@@ -31,7 +31,7 @@ async def test_non_allowlisted_sender_is_dropped(test_hex):
 
 
 async def test_non_command_is_forwarded_and_replied(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "  hello world  ")
     assert harness.hermes.submit_calls == [
         ("atlas", "  hello world  ", "event-1"),
@@ -40,7 +40,7 @@ async def test_non_command_is_forwarded_and_replied(test_hex):
 
 
 async def test_missing_event_id_generates_one(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     harness.ctx.event_id = None
     await harness.runtime.handle_dm(harness.ctx, "hello")
     generated = harness.hermes.submit_calls[0][2]
@@ -48,7 +48,7 @@ async def test_missing_event_id_generates_one(test_hex):
 
 
 async def test_run_id_is_tracked_during_turn_and_cleared(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     harness.hermes.gate.clear()
     task = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "hello"))
     await harness.hermes.entered.wait()
@@ -59,15 +59,15 @@ async def test_run_id_is_tracked_during_turn_and_cleared(test_hex):
 
 
 async def test_help_command_is_local(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "/HELP")
     assert harness.hermes.submit_calls == []
-    assert harness.bot.sent_events == []
+    assert len(harness.bot.sent_events) == 1  # the reply itself, no ack
     assert "Commands:" in harness.bot.sent[-1][1]
 
 
 async def test_unknown_command_is_local(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "/deploy now")
     assert harness.hermes.submit_calls == []
     assert "Unknown command /deploy" in harness.bot.sent[-1][1]
@@ -75,7 +75,6 @@ async def test_unknown_command_is_local(test_hex):
 
 async def test_model_list_is_a_numbered_user_defined_menu(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         providers=[
             {
                 "slug": "aspark",
@@ -100,7 +99,6 @@ async def test_model_list_is_a_numbered_user_defined_menu(test_hex):
 
 async def test_model_list_marks_the_current_selection(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         providers=[
             {
                 "slug": "aspark",
@@ -118,7 +116,7 @@ async def test_model_list_marks_the_current_selection(test_hex):
 
 async def test_model_list_fetch_failure_sends_error_text(test_hex):
     harness = make_harness(
-        allow_hex=test_hex, models_error=HermesError("gateway down"),
+        models_error=HermesError("gateway down"),
     )
     await harness.runtime.handle_dm(harness.ctx, "/model")
     assert "Something went wrong talking to Hermes." in harness.bot.sent[-1][1]
@@ -126,7 +124,6 @@ async def test_model_list_fetch_failure_sends_error_text(test_hex):
 
 async def test_model_list_with_no_user_defined_providers(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         providers=[
             {"slug": "openrouter", "models": ["claude"],
              "is_user_defined": False},
@@ -140,7 +137,6 @@ async def test_model_list_with_no_user_defined_providers(test_hex):
 
 async def test_model_number_switch_updates_and_persists(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         providers=[
             {
                 "slug": "aspark",
@@ -162,7 +158,7 @@ async def test_model_number_switch_updates_and_persists(test_hex):
 
 
 async def test_model_number_without_a_menu_hints(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "/model 2")
     assert "Send /model first to list available models." in (
         harness.bot.sent[-1][1]
@@ -172,7 +168,6 @@ async def test_model_number_without_a_menu_hints(test_hex):
 
 async def test_model_number_out_of_range_hints(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         providers=[
             {"slug": "aspark", "models": ["glm-5.3-flash"],
              "is_user_defined": True},
@@ -209,7 +204,7 @@ async def test_model_menu_reads_gateway_config_live(test_hex, tmp_path):
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+        gateway_config_path=str(gateway_yaml),
     )
     await harness.runtime.handle_dm(harness.ctx, "/model")
     reply = harness.bot.sent[-1][1]
@@ -235,7 +230,6 @@ async def test_model_menu_reads_gateway_config_live(test_hex, tmp_path):
 
 async def test_model_menu_falls_back_to_api_without_gateway_config(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         gateway_config_path="/nonexistent/config.yaml",
         providers=[
             {"slug": "aspark", "models": ["glm-5.3-flash"],
@@ -266,7 +260,7 @@ async def test_model_switch_after_restart_resolves_menu_and_context(
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+        gateway_config_path=str(gateway_yaml),
     )
     assert harness.runtime._model_menu == []  # fresh daemon: menu not loaded
     await harness.runtime.handle_dm(harness.ctx, "/model 2")
@@ -291,7 +285,7 @@ async def test_model_switch_reply_includes_context(test_hex, tmp_path):
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+        gateway_config_path=str(gateway_yaml),
     )
     await harness.runtime.handle_dm(harness.ctx, "/model openrouter/claude")
     assert (
@@ -301,7 +295,7 @@ async def test_model_switch_reply_includes_context(test_hex, tmp_path):
 
 
 async def test_model_set_command_persists(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "/model openrouter/claude")
     entry = harness.sessions.get("atlas")
     assert entry.model == "claude"
@@ -311,7 +305,7 @@ async def test_model_set_command_persists(test_hex):
 
 
 async def test_model_set_bad_usage(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "/model /bad")
     assert "Usage:" in harness.bot.sent[-1][1]
 
@@ -333,7 +327,6 @@ async def test_new_command_swaps_session_and_echoes_model_and_context(
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex,
         gateway_config_path=str(gateway_yaml),
     )
     harness.sessions.set(
@@ -361,7 +354,7 @@ async def test_new_command_unknown_context_variant(test_hex, tmp_path):
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+        gateway_config_path=str(gateway_yaml),
     )
     harness.sessions.set("atlas", "old-session", model="mystery", provider="p")
     await harness.runtime.handle_dm(harness.ctx, "/new")
@@ -384,7 +377,7 @@ async def test_new_command_default_model_falls_back_to_gateway_context(
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+        gateway_config_path=str(gateway_yaml),
     )
     harness.sessions.set(
         "atlas", "old-session", model="glm-5.3-flash", provider="aspark",
@@ -395,7 +388,6 @@ async def test_new_command_default_model_falls_back_to_gateway_context(
 
 async def test_new_command_surfaces_hermes_error_detail(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         create_error=HermesError(
             "create session failed (HTTP 400: Title 'nostr:Sam-I-Am' "
             "is already in use)",
@@ -417,7 +409,7 @@ async def test_new_command_resolves_gateway_default_model(test_hex, tmp_path):
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+        gateway_config_path=str(gateway_yaml),
     )
     await harness.runtime.handle_dm(harness.ctx, "/new")
     entry = harness.sessions.get("atlas")
@@ -428,7 +420,7 @@ async def test_new_command_resolves_gateway_default_model(test_hex, tmp_path):
 
 
 async def test_new_command_gateway_default_without_gateway_config(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "/new")
     reply = harness.bot.sent[-1][1]
     assert "Model: gateway default." in reply
@@ -436,7 +428,7 @@ async def test_new_command_gateway_default_without_gateway_config(test_hex):
 
 
 async def test_status_command(test_hex, clock):
-    harness = make_harness(allow_hex=test_hex, clock=clock)
+    harness = make_harness(clock=clock)
     harness.sessions.set("atlas", "sess-1", model="claude", provider="openrouter")
     harness.runtime.set_watchdog_status_provider(lambda: "ok")
     await harness.runtime.handle_dm(harness.ctx, "/status")
@@ -465,7 +457,6 @@ async def test_status_context_uses_last_turn_usage_and_gateway_total(
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex,
         clock=clock,
         gateway_config_path=str(gateway_yaml),
     )
@@ -480,7 +471,7 @@ async def test_status_context_uses_last_turn_usage_and_gateway_total(
 
 
 async def test_status_context_without_configured_total(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     harness.sessions.set("atlas", "sess-1", model="claude", provider="p")
     harness.sessions.update_usage("atlas", 45230)
     await harness.runtime.handle_dm(harness.ctx, "/status")
@@ -499,7 +490,7 @@ async def test_status_resolves_gateway_default_model(test_hex, tmp_path):
         encoding="utf-8",
     )
     harness = make_harness(
-        allow_hex=test_hex, gateway_config_path=str(gateway_yaml),
+        gateway_config_path=str(gateway_yaml),
     )
     await harness.runtime.handle_dm(harness.ctx, "/status")
     reply = harness.bot.sent[-1][1]
@@ -508,7 +499,7 @@ async def test_status_resolves_gateway_default_model(test_hex, tmp_path):
 
 
 async def test_status_reports_busy_during_a_turn(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     harness.hermes.gate.clear()
     task = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
     await harness.hermes.entered.wait()
@@ -526,35 +517,36 @@ async def test_status_reports_busy_during_a_turn(test_hex):
 
 
 async def test_second_dm_during_turn_steers_and_is_acked_once(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     harness.hermes.gate.clear()
 
     first = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
     await harness.hermes.entered.wait()
 
-    second_ctx = FakeCtx(sender_hex=test_hex, event_id="event-2")
+    second_ctx = FakeCtx(sender_hex=harness.ctx.sender_hex, event_id="event-2")
     await harness.runtime.handle_dm(second_ctx, "two")
 
     assert harness.hermes.steer_calls == [("run-1", "two")]
     assert len(harness.hermes.submit_calls) == 1
     # Both accepted DMs were acked, including the steered one.
     assert len(harness.bot.sent_events) == 2
-    assert harness.activity == ["ack", "submit", "ack", "steer"]
+    assert harness.activity == ["send", "submit", "send", "steer"]
     assert harness.runtime.queue_depth == 0
 
     harness.hermes.gate.set()
     await first
-    assert [text for _, text in harness.bot.sent] == ["hello"]
+    # Only the in-flight turn replies; the steered DM has no reply of its own.
+    assert [text for _, text in harness.bot.sent if text != "👀"] == ["hello"]
 
 
 async def test_steer_refused_falls_back_to_queued_turn(test_hex):
-    harness = make_harness(allow_hex=test_hex, steer_result=False)
+    harness = make_harness(steer_result=False)
     harness.hermes.gate.clear()
 
     first = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
     await harness.hermes.entered.wait()
 
-    second_ctx = FakeCtx(sender_hex=test_hex, event_id="event-2")
+    second_ctx = FakeCtx(sender_hex=harness.ctx.sender_hex, event_id="event-2")
     second = asyncio.create_task(
         harness.runtime.handle_dm(second_ctx, "two"),
     )
@@ -567,19 +559,22 @@ async def test_steer_refused_falls_back_to_queued_turn(test_hex):
     await asyncio.gather(first, second)
     assert [call[1] for call in harness.hermes.submit_calls] == ["one", "two"]
     assert harness.hermes.max_active == 1
-    assert len(harness.bot.sent) == 2
+    # Two acks and two replies: each queued turn replies.
+    assert [text for _, text in harness.bot.sent if text != "👀"] == [
+        "hello", "hello",
+    ]
     assert harness.runtime.queue_depth == 0
 
 
 async def test_steer_exception_falls_back_to_new_turn(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     harness.hermes.steer_results = [RuntimeError("gateway hiccup")]
     harness.hermes.gate.clear()
 
     first = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
     await harness.hermes.entered.wait()
 
-    second_ctx = FakeCtx(sender_hex=test_hex, event_id="event-2")
+    second_ctx = FakeCtx(sender_hex=harness.ctx.sender_hex, event_id="event-2")
     second = asyncio.create_task(
         harness.runtime.handle_dm(second_ctx, "two"),
     )
@@ -595,13 +590,12 @@ async def test_steer_exception_falls_back_to_new_turn(test_hex):
 
 async def test_replayed_duplicate_sends_nothing(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         submissions=[RunSubmission(run_id="run-1", replayed=True)],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
     # Only the immediate ack; a replay does not produce a reply.
     assert len(harness.bot.sent_events) == 1
-    assert harness.bot.sent == []
+    assert [text for _, text in harness.bot.sent] == ["👀"]
     assert harness.hermes.stream_calls == []
     assert harness.sessions.get("atlas").last_input_tokens is None
 
@@ -611,7 +605,6 @@ async def test_replayed_duplicate_sends_nothing(test_hex):
 
 async def test_hermes_error_sends_error_dm(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         submissions=[HermesError("gateway down")],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
@@ -621,7 +614,6 @@ async def test_hermes_error_sends_error_dm(test_hex):
 
 async def test_empty_reply_sends_error_dm(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         results=[TurnResult("   ", status="completed")],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
@@ -630,7 +622,6 @@ async def test_empty_reply_sends_error_dm(test_hex):
 
 async def test_failed_run_sends_error_dm(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         results=[TurnResult("", status="failed", error="model exploded")],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
@@ -643,7 +634,6 @@ async def test_failed_run_sends_error_dm(test_hex):
 
 async def test_completed_turn_persists_input_tokens(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         results=[TurnResult("hi", status="completed", input_tokens=45230)],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
@@ -652,7 +642,6 @@ async def test_completed_turn_persists_input_tokens(test_hex):
 
 async def test_completed_turn_without_usage_persists_none(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         results=[TurnResult("hi", status="completed")],
     )
     harness.sessions.set("atlas", "sess-1")
@@ -663,7 +652,6 @@ async def test_completed_turn_without_usage_persists_none(test_hex):
 
 async def test_failed_turn_does_not_overwrite_usage(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         results=[
             TurnResult(
                 "", status="failed", error="boom", input_tokens=123,
@@ -678,18 +666,17 @@ async def test_failed_turn_does_not_overwrite_usage(test_hex):
 
 async def test_long_reply_is_chunked(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         results=[TurnResult("x" * 5000, status="completed")],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
-    assert len(harness.bot.sent) == 2
-    assert harness.bot.sent[0][1].endswith(" (1/2)")
-    assert harness.bot.sent[1][1].endswith(" (2/2)")
+    chunks = [text for _, text in harness.bot.sent if text != "👀"]
+    assert len(chunks) == 2
+    assert chunks[0].endswith(" (1/2)")
+    assert chunks[1].endswith(" (2/2)")
 
 
 async def test_session_gone_is_recreated_and_retried(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         submissions=[HermesSessionGone("gone"), None],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
@@ -701,7 +688,7 @@ async def test_session_gone_is_recreated_and_retried(test_hex):
 
 async def test_command_reply_is_chunked_if_long(test_hex):
     options = [ModelOption("p", f"model-{index}") for index in range(500)]
-    harness = make_harness(allow_hex=test_hex, models=options)
+    harness = make_harness(models=options)
     await harness.runtime.handle_dm(harness.ctx, "/model")
     assert len(harness.bot.sent) >= 1
     assert all(len(text) <= 4096 for _, text in harness.bot.sent)
@@ -709,7 +696,7 @@ async def test_command_reply_is_chunked_if_long(test_hex):
 
 async def test_start_and_stop_are_delegated(test_hex):
     bot = FakeBot()
-    harness = make_harness(allow_hex=test_hex, bot=bot)
+    harness = make_harness(bot=bot)
     await harness.runtime.start()
     assert bot.started == 1
     assert bot.dm_handler == harness.runtime.handle_dm

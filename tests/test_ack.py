@@ -26,8 +26,9 @@ async def test_non_command_dm_sends_one_ack_before_submit():
     harness = make_harness(allow_hex=owner.public_key().to_hex())
     await harness.runtime.handle_dm(harness.ctx, "hello")
 
-    assert len(harness.bot.sent_events) == 1
-    assert harness.activity == ["ack", "submit"]
+    # The ack and the reply are both gift wraps now; the ack is first.
+    assert len(harness.bot.sent_events) == 2
+    assert harness.activity == ["send", "submit", "send"]
 
     sent = harness.bot.sent_events[0]
     assert sent.kind == 1059  # NIP-17 gift wrap
@@ -51,13 +52,13 @@ async def test_non_command_dm_sends_one_ack_before_submit():
 
 async def test_ack_is_sent_before_the_turn_lock_is_acquired(test_hex):
     """The ack must not wait for a queued turn behind an in-flight run."""
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     harness.hermes.gate.clear()
 
     first = asyncio.create_task(harness.runtime.handle_dm(harness.ctx, "one"))
     await harness.hermes.entered.wait()
 
-    second_ctx = FakeCtx(sender_hex=test_hex, event_id="event-2")
+    second_ctx = FakeCtx(sender_hex=harness.ctx.sender_hex, event_id="event-2")
     second = asyncio.create_task(
         harness.runtime.handle_dm(second_ctx, "two"),
     )
@@ -70,8 +71,9 @@ async def test_ack_is_sent_before_the_turn_lock_is_acquired(test_hex):
 
     harness.hermes.gate.set()
     await asyncio.gather(first, second)
-    # Two accepted non-command DMs, two acks; the second preceded its steer.
-    assert harness.activity == ["ack", "submit", "ack", "steer"]
+    # Two accepted non-command DMs, two acks, then the first turn's reply;
+    # the second ack preceded its steer.
+    assert harness.activity == ["send", "submit", "send", "steer", "send"]
 
 
 async def test_steered_dm_gets_an_ack():
@@ -97,21 +99,24 @@ async def test_steered_dm_gets_an_ack():
 
 
 async def test_commands_get_no_ack(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "/status")
     await harness.runtime.handle_dm(harness.ctx, "/help")
-    assert harness.bot.sent_events == []
+    # Command replies are sent, but none of them is the 👀 ack.
+    assert len(harness.bot.sent_events) == 2
+    assert all(text != "👀" for _, text in harness.bot.sent)
 
 
 async def test_ack_send_failure_does_not_break_the_turn(test_hex):
     harness = make_harness(
-        allow_hex=test_hex, send_error=RuntimeError("relay down"),
+        send_error=RuntimeError("relay down"),
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
+    # The ack (and, with relays down, the reply) fail without aborting the turn.
     assert harness.hermes.submit_calls == [
         ("atlas", "hello", "event-1"),
     ]
-    assert harness.bot.sent[-1][1] == "hello"
+    assert harness.bot.sent == []
     assert harness.bot.sent_events == []
 
 
@@ -122,7 +127,8 @@ async def test_nip04_sender_gets_a_kind4_ack():
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
 
-    assert len(harness.bot.sent_events) == 1
+    # Ack first, then the reply; both are kind-4 for a NIP-04 correspondent.
+    assert len(harness.bot.sent_events) == 2
     sent = harness.bot.sent_events[0]
     assert sent.kind == 4
     plaintext = owner.nip04_decrypt(
@@ -157,20 +163,19 @@ async def test_config_knobs_are_honored():
 
 async def test_ack_uses_sender_inbox_relays_when_published(test_hex):
     harness = make_harness(
-        allow_hex=test_hex,
         nip17_relays=["wss://inbox.example", "wss://nos.lol"],
     )
     await harness.runtime.handle_dm(harness.ctx, "hello")
 
-    assert len(harness.bot.client.added_relays) == 2
-    assert harness.bot.client.connect_calls == 1
-    # The relay url strings are what the kind-10050 lookup returned.
-    urls = [str(relay) for relay in harness.bot.client.added_relays]
+    # Ack and reply each publish to the two inbox relays; dedupe the urls.
+    urls = {str(relay) for relay in harness.bot.client.added_relays}
+    assert len(urls) == 2
+    assert harness.bot.client.connect_calls >= 1
     assert all("inbox.example" in url or "nos.lol" in url for url in urls)
 
 
 async def test_ack_without_inbox_relays_broadcasts(test_hex):
-    harness = make_harness(allow_hex=test_hex)
+    harness = make_harness()
     await harness.runtime.handle_dm(harness.ctx, "hello")
 
     sent = harness.bot.sent_events[0]

@@ -278,3 +278,30 @@ def test_control_port_zero_disables(test_npub):
 def test_bad_control_knobs_rejected(test_npub, extra, match):
     with pytest.raises(ConfigError, match=match):
         parse_config(config_text(test_npub, extra=extra), environ=NSEC_ENV)
+
+
+# -- outbound spread -----------------------------------------------------------
+
+
+def test_outbound_spread_defaults_to_one_hour(test_npub):
+    config = parse_config(config_text(test_npub), environ=NSEC_ENV)
+    assert config.outbound_spread_seconds == 3600
+
+
+def test_outbound_spread_custom(test_npub):
+    config = parse_config(
+        config_text(test_npub, extra="outbound_spread_seconds = 120\n"),
+        environ=NSEC_ENV,
+    )
+    assert config.outbound_spread_seconds == 120
+
+
+@pytest.mark.parametrize("value", ["0", "-5", '"soon"', "true"])
+def test_invalid_outbound_spread_rejected(test_npub, value):
+    with pytest.raises(ConfigError, match="outbound_spread_seconds"):
+        parse_config(
+            config_text(
+                test_npub, extra=f"outbound_spread_seconds = {value}\n",
+            ),
+            environ=NSEC_ENV,
+        )
