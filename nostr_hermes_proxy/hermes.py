@@ -3,7 +3,8 @@
 Talks only to the authenticated API server (DESIGN.md §4). The client owns the
 session map: ``ensure_session`` creates/recreates sessions, ``submit_run``
 creates an idempotent run, ``stream_run`` consumes its SSE event stream (with a
-single poll fallback), and ``steer`` feeds text into an in-flight run.
+single poll fallback), ``steer`` feeds text into an in-flight run, and
+``stop_run`` cancels one.
 
 Turns use ``/v1/runs`` rather than the session-chat stream because the session
 chat endpoint ignores ``Idempotency-Key`` (Probe A), while runs are durable for
@@ -450,6 +451,35 @@ class HermesClient:
         except ValueError:
             return False
         return isinstance(data, dict) and data.get("accepted") is True
+
+    async def stop_run(self, run_id: str) -> str | None:
+        """``POST /v1/runs/{run_id}/stop``; the gateway's status word or None.
+
+        A mid-flight stop answers 200 with ``{"status": "stopping"}``; when the
+        run already finished first the same call answers
+        ``{"status": "completed"}``. Any network or HTTP failure returns None
+        so the caller can tell the user the stop did not land.
+        """
+        url = f"/v1/runs/{quote(run_id, safe='')}/stop"
+        try:
+            response = await self._client.post(url)
+        except httpx.HTTPError as exc:
+            logger.warning("Stop for run %s failed: %s", run_id, exc)
+            return None
+        if response.status_code != 200:
+            logger.info(
+                "Stop for run %s refused (HTTP %s)",
+                run_id, response.status_code,
+            )
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        status = data.get("status")
+        return status if isinstance(status, str) else None
 
     async def _poll_run(
         self, run_id: str,

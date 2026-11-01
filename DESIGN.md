@@ -69,7 +69,7 @@ session mapping keeping each conversation separate.
 | **Allowlist** | Single npub check in the `on_dm` handler (`ctx.sender_hex == ALLOWED`) |
 | **Hermes client** | `httpx` against `127.0.0.1:8642`, bearer `API_SERVER_KEY`. Session create / chat-stream / model-options / runs |
 | **Session map** | personality → Hermes session id, **persisted atomically** (tmp+replace, the hermes-nostr seen-IDs pattern). Create on first contact via `POST /api/sessions`. `/new` swaps it |
-| **Command layer** | `/new`, `/model`, `/status` parsed *before* forwarding. See §6 |
+| **Command layer** | `/new`, `/model`, `/status`, `/stop` parsed *before* forwarding (and before the turn lock — `/stop` works mid-turn). See §6 |
 | **Ack policy** | Instant `👀` DM on every accepted non-command DM (including steers), with a 20-minute absolute NIP-40 expiry (`ack_text`/`ack_ttl_seconds` knobs). Built proxy-side (rumor + gift wrap via the SDK primitives) so it doesn't inherit the 7-day default |
 | **Ordered multi-chunk delivery** | NIP-59 randomizes wrap timestamps up to 2 days back, which scrambles multi-chunk ordering in clients. Every delivery (acks, replies, cron outbound) assigns each chunk a random backdate within `outbound_spread_seconds` (default 3600), **sorted ascending across chunks** — chunk 1 is always the newest, so clients show chunks in reading order while each wrap still looks individually random to relays. Implemented via nostrbot-sdk v0.8.0 `make_gift_wrap_async(..., wrap_created_at=…)` |
 | **Tool verbosity** | From the turn's SSE stream: omit entirely, or one-line summary (tools used, duration, failures). Precedent: hermes-nostr's `format_tool_event` returns None — on Nostr every tool event would be its own gift wrap |
@@ -286,6 +286,8 @@ relays = ["wss://nos.lol", "wss://relay.damus.io"]
   caller; proactive agent-initiated sends remain out of scope. The daemon's
   `default_personality` knob (set to Sam-I-Am) resolves calls that omit
   `--personality`; with several identities configured and no default, the
-  control plane still rejects the call with HTTP 400.
+  control plane still rejects the call with HTTP 400. A read-only
+  `GET /v1/outbox/status` (same bearer auth) exposes the pending queue for
+  delivery debugging — see `docs/HERMES-DIAGNOSTICS.md`.
 - Group chats, media, reactions/read receipts (no NIP-17 equivalents without
   metadata leaks).

@@ -26,7 +26,8 @@ exists.
 - Intercept special commands before Hermes: `/new` (fresh conversation,
   echoes model + context size), `/model` (numbered menu of your user-defined
   providers/models, switch by number or `provider/model`), `/status`
-  (conversation position, busy/idle, session, queue, relays, watchdog)
+  (conversation position, busy/idle, session, queue, relays, watchdog),
+  `/stop` (cancel the reply currently being written)
 
 ## Architecture
 

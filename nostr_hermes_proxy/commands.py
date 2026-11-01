@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Sequence
 
-COMMANDS = ("new", "model", "status", "help")
+COMMANDS = ("new", "model", "status", "stop", "help")
 
 # Common typo aliases, normalized at parse time so they never reach Hermes.
 _COMMAND_ALIASES = {"nee": "new"}
@@ -131,6 +131,7 @@ def help_text() -> str:
         "/model # - switch to a model from that list\n"
         "/model provider/model - switch this personality's model\n"
         "/status - show model, context, state, queue, relays, watchdog\n"
+        "/stop - cancel the reply currently being written\n"
         "/help - show this message"
     )
 

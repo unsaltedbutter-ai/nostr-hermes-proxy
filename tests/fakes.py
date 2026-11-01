@@ -235,6 +235,8 @@ class FakeHermes:
         models_error: BaseException | None = None,
         create_error: BaseException | None = None,
         steer_result: bool = True,
+        stop_result: str | None = "stopping",
+        stop_results: list[Any] | None = None,
         activity: list[str] | None = None,
     ) -> None:
         self.sessions = sessions
@@ -257,6 +259,11 @@ class FakeHermes:
         )
         self.steer_result = steer_result
         self.steer_results: list[Any] = []
+        self.stop_result = stop_result
+        self.stop_results: list[Any] = (
+            list(stop_results) if stop_results is not None else []
+        )
+        self.stops: list[str] = []
         self.active = 0
         self.max_active = 0
         self.gate = asyncio.Event()
@@ -355,6 +362,19 @@ class FakeHermes:
             raise item
         return bool(item)
 
+    async def stop_run(self, run_id: str) -> str | None:
+        self.stops.append(run_id)
+        if self.activity is not None:
+            self.activity.append("stop")
+        item = (
+            self.stop_results.pop(0)
+            if self.stop_results
+            else self.stop_result
+        )
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
 
 @dataclass
 class PersonalityHarness:
@@ -376,6 +396,8 @@ def make_harness(
     results: list[Any] | None = None,
     submissions: list[Any] | None = None,
     steer_result: bool = True,
+    stop_result: str | None = "stopping",
+    stop_results: list[Any] | None = None,
     models: list[ModelOption] | None = None,
     providers: list[Any] | None = None,
     models_error: BaseException | None = None,
@@ -425,6 +447,8 @@ def make_harness(
         models_error=models_error,
         create_error=create_error,
         steer_result=steer_result,
+        stop_result=stop_result,
+        stop_results=stop_results,
         activity=activity,
     )
     config = PersonalityConfig(

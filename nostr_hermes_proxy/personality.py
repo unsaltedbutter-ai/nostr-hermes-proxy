@@ -40,6 +40,7 @@ from .config import (
 )
 from .gateway_config import GatewayConfigError, GatewayModels, read_gateway_models
 from .hermes import (
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     HermesAuthError,
     HermesClient,
@@ -53,6 +54,26 @@ from .sessions import SessionMap
 logger = logging.getLogger(__name__)
 
 MIN_OUTBOUND_EXPIRY_SECONDS = 60
+
+#: /stop replies. The gateway reports "stopping" for a stop that landed and
+#: "completed" when the run beat the request to the finish line.
+STOPPED_TEXT = "🛑 Stopped."
+STOP_TOO_LATE_TEXT = "Too late — it already finished."
+STOP_UNREACHABLE_TEXT = "Couldn't reach the gateway to stop the run."
+STOP_NOTHING_TEXT = "Nothing is running."
+
+#: Status words that mean the stop was accepted (the run is winding down).
+#: Anything else, including "completed", means the turn already finished.
+_STOP_ACCEPTED_STATUSES = frozenset({
+    "stopping",
+    "cancelling",
+    "canceling",
+    "running",
+    "queued",
+    "pending",
+    "started",
+    "in_progress",
+})
 
 
 class DeliveryError(RuntimeError):
@@ -213,7 +234,42 @@ class PersonalityRuntime:
         if name == "status":
             await self._send_chunks(ctx, self._status_text())
             return
+        if name == "stop":
+            await self._command_stop(ctx)
+            return
         await self._send_chunks(ctx, unknown_text(name))
+
+    async def _command_stop(self, ctx: Any) -> None:
+        """Cancel the in-flight run; commands bypass the turn lock.
+
+        ``handle_dm`` dispatches commands before touching ``_turn_lock``, so a
+        /stop arriving mid-turn is handled immediately while ``_run_id`` still
+        names the running run.
+        """
+        run_id = self._run_id
+        if not run_id:
+            await self._send_chunks(ctx, STOP_NOTHING_TEXT)
+            return
+        try:
+            status = await self.hermes.stop_run(run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Stop for run %s for %s failed", run_id, self.name)
+            status = None
+        if status is None:
+            logger.info("Could not stop run %s for %s", run_id, self.name)
+            await self._send_chunks(ctx, STOP_UNREACHABLE_TEXT)
+            return
+        if status.strip().lower() in _STOP_ACCEPTED_STATUSES:
+            logger.info("Stop accepted for run %s for %s", run_id, self.name)
+            await self._send_chunks(ctx, STOPPED_TEXT)
+            return
+        logger.info(
+            "Stop for run %s for %s arrived too late (status %s)",
+            run_id, self.name, status,
+        )
+        await self._send_chunks(ctx, STOP_TOO_LATE_TEXT)
 
     async def _command_new(self, ctx: Any) -> None:
         previous = self.sessions.get(self.name)
@@ -465,6 +521,14 @@ class PersonalityRuntime:
                     self.sessions.update_usage(
                         self.name, result.input_tokens,
                     )
+                if result.status == STATUS_CANCELLED:
+                    # /stop already confirmed to the owner; a cancelled turn
+                    # must not also publish chunks, acks, or an error text.
+                    logger.info(
+                        "Run %s for %s was cancelled; sending no reply",
+                        submission.run_id, self.name,
+                    )
+                    return
                 if result.status != STATUS_COMPLETED:
                     await self._send_chunks(
                         ctx,
@@ -689,4 +753,12 @@ class PersonalityRuntime:
         return detail[:200] if detail else ""
 
 
-__all__ = ["DeliveryError", "MIN_OUTBOUND_EXPIRY_SECONDS", "PersonalityRuntime"]
+__all__ = [
+    "DeliveryError",
+    "MIN_OUTBOUND_EXPIRY_SECONDS",
+    "PersonalityRuntime",
+    "STOPPED_TEXT",
+    "STOP_NOTHING_TEXT",
+    "STOP_TOO_LATE_TEXT",
+    "STOP_UNREACHABLE_TEXT",
+]

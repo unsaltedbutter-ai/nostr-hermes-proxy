@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from nostr_hermes_proxy.chunking import truncate_message
 from nostr_hermes_proxy.config import Config
 from nostr_hermes_proxy.control import create_app
 from nostr_hermes_proxy.outbox import Outbox
@@ -302,3 +303,144 @@ async def test_recipient_is_never_caller_supplied(tmp_path, test_hex):
     ]
     assert test_hex in p_tags
     assert "ab" * 32 not in p_tags
+
+
+# -- GET /v1/outbox/status -----------------------------------------------------
+
+
+async def test_outbox_status_requires_auth(tmp_path, test_hex):
+    app, _outbox, _ = _setup(tmp_path, test_hex)
+    async with TestClient(TestServer(app)) as client:
+        missing = await client.get("/v1/outbox/status")
+        wrong = await client.get(
+            "/v1/outbox/status",
+            headers={"Authorization": "Bearer nope"},
+        )
+        assert missing.status == 401
+        assert wrong.status == 401
+        assert (await missing.json())["error"] == "unauthorized"
+
+
+async def test_outbox_status_empty_outbox(tmp_path, test_hex):
+    app, _outbox, _ = _setup(tmp_path, test_hex)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/v1/outbox/status", headers=AUTH)
+        assert response.status == 200
+        assert await response.json() == {
+            "pending_total": 0,
+            "personalities": [],
+            "rate_limit_per_minute": 10,
+        }
+
+
+async def test_outbox_status_reports_queued_message(tmp_path, test_hex):
+    app, outbox, _ = _setup(tmp_path, test_hex)
+    text = "First line\nsecond line\n" + "y" * 5000
+    expected_preview = ("First line second line " + "y" * 5000)[:80]
+    async with TestClient(TestServer(app)) as client:
+        posted = await client.post(
+            "/v1/dm", json={"text": text}, headers=AUTH,
+        )
+        assert posted.status == 202
+        posted_body = await posted.json()
+
+        response = await client.get("/v1/outbox/status", headers=AUTH)
+        assert response.status == 200
+        body = await response.json()
+
+    assert body["pending_total"] == 1
+    assert body["rate_limit_per_minute"] == 10
+    [entry] = body["personalities"]
+    assert entry["name"] == "atlas"
+    assert entry["pending"] == 1
+    [message] = entry["messages"]
+    assert message["message_id"] == posted_body["message_id"]
+    assert isinstance(message["created_at"], float)
+    assert message["created_at"] > 0
+    assert message["attempts"] == 0
+    assert message["next_attempt_at"] == 0.0
+    assert message["chunks"] == posted_body["chunks"] > 1
+    assert message["chunks"] == len(truncate_message(text))
+    assert message["preview"] == expected_preview
+    assert len(message["preview"]) == 80
+    assert "\n" not in message["preview"]
+
+
+async def test_outbox_status_sorts_personalities_and_messages(
+    tmp_path, test_hex,
+):
+    app, _outbox, _ = _setup_multi(tmp_path, test_hex)
+    async with TestClient(TestServer(app)) as client:
+        ids = []
+        for payload in (
+            {"text": "atlas one", "personality": "atlas"},
+            {"text": "atlas two", "personality": "atlas"},
+            {"text": "notible one", "personality": "notible"},
+        ):
+            posted = await client.post("/v1/dm", json=payload, headers=AUTH)
+            assert posted.status == 202
+            ids.append((await posted.json())["message_id"])
+
+        response = await client.get("/v1/outbox/status", headers=AUTH)
+        body = await response.json()
+
+    assert body["pending_total"] == 3
+    assert [entry["name"] for entry in body["personalities"]] == [
+        "atlas", "notible",
+    ]
+    assert [
+        message["message_id"] for message in body["personalities"][0]["messages"]
+    ] == ids[:2]
+    assert body["personalities"][1]["pending"] == 1
+
+
+async def test_outbox_status_shows_retry_backoff(tmp_path, test_hex):
+    app, outbox, _ = _setup(tmp_path, test_hex)
+    async with TestClient(TestServer(app)) as client:
+        posted = await client.post(
+            "/v1/dm", json={"text": "relay down"}, headers=AUTH,
+        )
+        assert posted.status == 202
+
+    async def deliver(personality, text, expiry):
+        raise RuntimeError("relay unreachable")
+
+    stats = await outbox.drain_once(deliver)
+    assert stats["retried"] == 1
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/v1/outbox/status", headers=AUTH)
+        body = await response.json()
+
+    [message] = body["personalities"][0]["messages"]
+    assert message["attempts"] == 1
+    assert message["next_attempt_at"] > message["created_at"]
+    assert message["preview"] == "relay down"
+    assert body["pending_total"] == 1
+
+
+async def test_outbox_status_is_read_only(tmp_path, test_hex):
+    app, outbox, _ = _setup(tmp_path, test_hex)
+    payload = {"text": "once", "idempotency_key": "cron-2026-11-01"}
+    async with TestClient(TestServer(app)) as client:
+        posted = await client.post("/v1/dm", json=payload, headers=AUTH)
+        assert posted.status == 202
+        message_id = (await posted.json())["message_id"]
+
+        before = [message.to_json() for message in outbox.queued()]
+        first = await client.get("/v1/outbox/status", headers=AUTH)
+        second = await client.get("/v1/outbox/status", headers=AUTH)
+        duplicate = await client.post("/v1/dm", json=payload, headers=AUTH)
+        after = [message.to_json() for message in outbox.queued()]
+
+        assert first.status == second.status == 200
+        # Identical snapshots: reading the status did not drain or mutate.
+        assert await first.json() == await second.json()
+        assert duplicate.status == 202
+        duplicate_body = await duplicate.json()
+        assert duplicate_body["duplicate"] is True
+        assert duplicate_body["message_id"] == message_id
+
+    assert outbox.pending_count() == 1
+    assert before == after
+    assert after[0]["message_id"] == message_id

@@ -159,6 +159,7 @@ class ControlPlane:
         app = web.Application()
         app.router.add_post("/v1/dm", self.handle_dm)
         app.router.add_get("/v1/health", self.handle_health)
+        app.router.add_get("/v1/outbox/status", self.handle_outbox_status)
         return app
 
     # -- auth ------------------------------------------------------------------
@@ -286,6 +287,20 @@ class ControlPlane:
             }
             for name, healthy in zip(names, health)
         ])
+
+    # -- GET /v1/outbox/status -------------------------------------------------
+
+    async def handle_outbox_status(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return _error("unauthorized", 401)
+        snapshot = self.outbox.status_snapshot()
+        # Polled by diagnostics: debug only, and no message text above the
+        # previews the snapshot already exposes to the caller.
+        logger.debug(
+            "Outbox status: %d pending across %d personality queue(s)",
+            snapshot["pending_total"], len(snapshot["personalities"]),
+        )
+        return web.json_response(snapshot)
 
     # -- lifecycle -------------------------------------------------------------
 

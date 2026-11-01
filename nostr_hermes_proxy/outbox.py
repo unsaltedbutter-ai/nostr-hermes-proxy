@@ -36,6 +36,7 @@ RATE_WINDOW_SECONDS = 60.0
 MAX_DELIVERY_ATTEMPTS = 5
 DEFAULT_RATE_LIMIT_PER_MINUTE = 10
 DEFAULT_RETRY_BACKOFF_SECONDS = 2.0
+STATUS_PREVIEW_CHARS = 80
 
 DeliveryCallback = Callable[[str, str, "int | None"], Awaitable[Any]]
 
@@ -125,6 +126,24 @@ class OutboxMessage:
         )
 
 
+def _preview(text: str) -> str:
+    """First ``STATUS_PREVIEW_CHARS`` characters on a single line."""
+    lines = (line.strip() for line in text.splitlines())
+    single_line = " ".join(line for line in lines if line)
+    return single_line[:STATUS_PREVIEW_CHARS]
+
+
+def _message_status(message: OutboxMessage) -> dict[str, Any]:
+    return {
+        "message_id": message.message_id,
+        "created_at": message.created_at,
+        "attempts": message.attempts,
+        "next_attempt_at": message.next_attempt_at,
+        "chunks": len(message.chunks),
+        "preview": _preview(message.text),
+    }
+
+
 class Outbox:
     """Thread-safe queue + idempotency ledger with an optional JSON backing."""
 
@@ -176,6 +195,39 @@ class Outbox:
                 for queue in self._queues.values()
                 for message in queue
             ]
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """Read-only, JSON-ready view of the pending queues.
+
+        Pure queue-derived: personalities whose queue is empty are omitted
+        because this class never learns the configured names. Never mutates
+        state, never touches the rate window, and never drains a message.
+        """
+        with self._lock:
+            personalities: list[dict[str, Any]] = []
+            pending_total = 0
+            for name, queue in self._queues.items():
+                messages = sorted(queue, key=lambda message: message.created_at)
+                if not messages:
+                    # Empty deques are pruned by the drain loop; tolerate one
+                    # held by a concurrent enqueue without reporting it.
+                    continue
+                pending_total += len(messages)
+                personalities.append(
+                    {
+                        "name": name,
+                        "pending": len(messages),
+                        "messages": [
+                            _message_status(message) for message in messages
+                        ],
+                    }
+                )
+            personalities.sort(key=lambda entry: entry["name"])
+            return {
+                "pending_total": pending_total,
+                "personalities": personalities,
+                "rate_limit_per_minute": self.rate_limit_per_minute,
+            }
 
     # -- enqueue ---------------------------------------------------------------
 
