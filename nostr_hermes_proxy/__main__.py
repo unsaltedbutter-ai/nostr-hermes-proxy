@@ -22,6 +22,84 @@ logger = logging.getLogger("nostr_hermes_proxy")
 
 DEFAULT_CONFIG_PATH = "~/.config/nostr-hermes-proxy/config.toml"
 
+#: Seconds between personality starts. Relay per-IP rate limits silently
+#: reject publish bursts; staggering keeps each identity's metadata intact.
+STARTUP_STAGGER_SECONDS = 6.0
+
+#: Read-back delay before verifying the published DM relay lists.
+METADATA_VERIFY_DELAY_SECONDS = 5.0
+
+
+async def _verify_and_repair_dm_relay_lists(
+    runtimes: list[PersonalityRuntime],
+) -> None:
+    """Verify each identity's kind-10050 landed; republish any that didn't.
+
+    Relays can silently drop publishes under per-IP rate limits, and a
+    missing DM relay list makes senders strand the identity (NIP-17 senders
+    read the recipient's kind-10050 to choose delivery relays). Best-effort:
+    any probe failure only logs.
+    """
+    import datetime
+
+    from nostr_sdk import (
+        ClientBuilder,
+        Filter,
+        Keys,
+        Kind,
+        PublicKey,
+        RelayUrl,
+        ReqTarget,
+    )
+
+    await asyncio.sleep(METADATA_VERIFY_DELAY_SECONDS)
+    relay = "wss://nos.lol"
+    try:
+        client = ClientBuilder().build()
+        await client.add_relay(RelayUrl.parse(relay))
+        await client.connect()
+        try:
+            for runtime in runtimes:
+                author = PublicKey.parse(
+                    Keys.parse(runtime.config.nsec).public_key().to_hex(),
+                )
+                deadline = asyncio.get_event_loop().time() + 6.0
+                found = False
+                while True:
+                    events = await client.fetch_events(
+                        ReqTarget.auto([
+                            Filter().author(author).kind(Kind(10050)),
+                        ]),
+                        datetime.timedelta(seconds=6),
+                    )
+                    if events:
+                        found = True
+                        break
+                    if asyncio.get_event_loop().time() > deadline:
+                        break
+                    await asyncio.sleep(1.0)
+                if found:
+                    logger.info(
+                        "DM relay list verified on %s for %s",
+                        relay, runtime.name,
+                    )
+                    continue
+                logger.warning(
+                    "DM relay list for %s missing on %s — republishing",
+                    runtime.name, relay,
+                )
+                await runtime.bot.republish_metadata()
+                await asyncio.sleep(3.0)
+        finally:
+            await client.disconnect()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning(
+            "DM relay list verification failed (non-fatal)",
+            exc_info=True,
+        )
+
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -110,18 +188,26 @@ async def run(config: Config) -> int:
         len(runtimes), config.hermes_url,
     )
     try:
-        starts = [
-            asyncio.create_task(runtime.start(), name=f"start_{runtime.name}")
-            for runtime in runtimes
-        ]
-        results = await asyncio.gather(*starts, return_exceptions=True)
-        for runtime, result in zip(runtimes, results):
-            if isinstance(result, BaseException):
+        # Stagger the starts: each personality publishes kind 0/10002/10050
+        # on connect, and relays enforce per-IP rate limits that silently
+        # reject bursts (Notible's DM relay list was lost this way on
+        # 2026-11-01 — nos.lol accepted three identities' metadata and
+        # dropped the fourth without any error surfacing).
+        for index, runtime in enumerate(runtimes):
+            if index:
+                await asyncio.sleep(STARTUP_STAGGER_SECONDS)
+            try:
+                await runtime.start()
+            except Exception as exc:
                 logger.error(
                     "Personality %s failed to start: %s",
-                    runtime.name, type(result).__name__,
+                    runtime.name, type(exc).__name__,
                 )
-                logger.debug("Start failure detail", exc_info=result)
+                logger.debug("Start failure detail", exc_info=exc)
+        verify_task = asyncio.create_task(
+            _verify_and_repair_dm_relay_lists(runtimes),
+            name="verify_dm_relay_lists",
+        )
         if config.control_port:
             token, created = ensure_control_token(config.control_token_path)
             token_path = Path(config.control_token_path).expanduser()
@@ -145,6 +231,7 @@ async def run(config: Config) -> int:
         await shutdown.wait()
     finally:
         logger.info("Shutting down")
+        verify_task.cancel()
         if control is not None:
             await control.stop()
         await outbox.stop_worker()
