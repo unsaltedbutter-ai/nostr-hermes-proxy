@@ -13,6 +13,9 @@ from typing import Sequence
 
 COMMANDS = ("new", "model", "status", "help")
 
+# Common typo aliases, normalized at parse time so they never reach Hermes.
+_COMMAND_ALIASES = {"nee": "new"}
+
 MODEL_MENU_PROMPT = "Reply /model # to switch."
 MODEL_MENU_HINT = "Send /model first to list available models."
 NO_MODELS_TEXT = (
@@ -50,6 +53,7 @@ def parse_command(text: str) -> Command | None:
         return None
     head, _, args = stripped[1:].partition(" ")
     name = head.strip().lower()
+    name = _COMMAND_ALIASES.get(name, name)
     return Command(name=name, args=args.strip())
 
 

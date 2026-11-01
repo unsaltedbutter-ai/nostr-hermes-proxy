@@ -34,6 +34,9 @@ def test_non_command_is_none():
 def test_command_case_insensitive_and_args():
     assert parse_command("/NEW").name == "new"
     assert parse_command("/MoDeL openrouter/x").name == "model"
+    assert parse_command("/nee").name == "new"
+    assert parse_command("/nee extra args").name == "new"
+    assert parse_command("/nee extra args").args == "extra args"
     assert parse_command("/MoDeL openrouter/x").args == "openrouter/x"
     assert parse_command("  /status  ").name == "status"
 
