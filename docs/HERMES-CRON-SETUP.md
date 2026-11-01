@@ -11,7 +11,9 @@ A control plane inside the `nostr-hermes-proxy` daemon (LaunchAgent
 
 - **Endpoint:** `http://127.0.0.1:8787/v1/dm` — loopback only.
 - **Auth:** `Authorization: Bearer $(cat ~/.config/nostr-hermes-proxy/control-token)`
-- **`nostr-send` CLI** on PATH (installed in the proxy venv):
+- **`nostr-send` CLI** — installed in the proxy venv and symlinked at
+  `~/.local/bin/nostr-send`; the cron instruction uses the absolute
+  venv path so minimal-PROMPT cron shells work regardless of PATH:
   `/Users/butter/nostr-hermes-proxy/venv/bin/nostr-send`
 - **Verified behaviors** (acceptance run 2026-10-31): 202 on accept ·
   idempotency-key retries return the stored result with `"duplicate": true`
@@ -54,7 +56,8 @@ For each of these jobs:
 
 ```
 DELIVERY: Send your final output to the user by running:
-  nostr-send --idempotency-key <job-name>-$(date +%F) --file <(your output)
+  /Users/butter/nostr-hermes-proxy/venv/bin/nostr-send \
+    --idempotency-key <job-name>-$(date +%F) --file <(your output)
 If your result is [SILENT], do NOT run nostr-send — emit [SILENT] as usual.
 If nostr-send exits nonzero, state "NOSTR-SEND FAILED" as the first line of
 your final output so the failure is visible in the cron run store.
