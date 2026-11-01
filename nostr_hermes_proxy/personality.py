@@ -524,8 +524,12 @@ class PersonalityRuntime:
             if expiry_seconds is None
             else self._clamp_expiry(expiry_seconds)
         )
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks, start=1):
             await self._deliver_chunk(recipient_hex, chunk, ttl, protocol)
+            logger.info(
+                "Outbound chunk %d/%d to %s (%d chars)",
+                index, len(chunks), recipient_hex[:16], len(chunk),
+            )
         return len(chunks)
 
     def _clamp_expiry(self, expiry_seconds: int) -> int:
@@ -636,6 +640,10 @@ class PersonalityRuntime:
             if ok is False:
                 logger.warning("send_dm reported failure for %s", self.name)
                 return
+            logger.info(
+                "Sent reply chunk to %s (%d chars)", ctx.sender_hex[:16],
+                len(chunk),
+            )
 
     @staticmethod
     def _error_detail(exc: HermesError) -> str:
