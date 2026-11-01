@@ -249,6 +249,21 @@ curl -s -X POST http://127.0.0.1:8787/v1/dm \
 [{"name":"atlas","healthy":true,"relay_count":2,"watchdog":"ok"}]
 ```
 
+## Documentation
+
+**New here? Start with [docs/START-HERE.md](docs/START-HERE.md)** — it maps
+every document to the situation you're in:
+
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — running, configuring, and
+  extending the daemon day to day
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — symptom-driven
+  debugging playbook with paste-ready relay probes
+- [docs/ENHANCING.md](docs/ENHANCING.md) — recipes for commands, config
+  knobs, and SDK work, plus testing and commit conventions
+- [DESIGN.md](DESIGN.md) · [OPTIONS.md](OPTIONS.md) ·
+  [INCIDENTS.md](INCIDENTS.md) — rationale, rejected alternatives, and
+  post-mortems
+
 ## Development
 
 ```sh
